@@ -337,10 +337,10 @@ getPageTitle : Model -> String
 getPageTitle model =
     case model.page of
         HomePage ->
-            "Mannschaftsorganisation"
+            "Zusammenspiel"
 
         CreateTeamPage ->
-            "Mannschaft erstellen"
+            "Team erstellen"
 
         TeamPage _ ->
             case model.currentTeam of
@@ -396,7 +396,7 @@ viewHeader model =
                 , Attr.style "margin" "0"
                 , Attr.style "flex-shrink" "0"
                 ]
-                [ Html.text "Team" ]
+                [ Html.text "Zusammenspiel" ]
             , Html.nav
                 [ Attr.style "display" "flex"
                 , Attr.style "align-items" "center"
@@ -484,7 +484,7 @@ viewHomePage =
             , Attr.style "color" "#1e293b"
             , Attr.style "margin-bottom" "1rem"
             ]
-            [ Html.text "Organisiere deine Mannschaft" ]
+            [ Html.text "Organisiere dein Team" ]
         , Html.p
             [ Attr.style "font-size" "1.1rem"
             , Attr.style "color" "#64748b"
@@ -505,7 +505,7 @@ viewHomePage =
             , Attr.style "font-weight" "500"
             , Attr.style "transition" "background-color 0.2s"
             ]
-            [ Html.text "Deine Mannschaft erstellen" ]
+            [ Html.text "Dein Team erstellen" ]
         ]
 
 
@@ -522,7 +522,7 @@ viewCreateTeamPage model =
             , Attr.style "margin-bottom" "1.5rem"
             , Attr.style "text-align" "center"
             ]
-            [ Html.text "Neue Mannschaft erstellen" ]
+            [ Html.text "Neues Team erstellen" ]
         , Html.form
             [ Events.onSubmit CreateTeamSubmitted
             , Attr.style "background-color" "white"
@@ -538,12 +538,12 @@ viewCreateTeamPage model =
                     , Attr.style "color" "#374151"
                     , Attr.style "margin-bottom" "0.5rem"
                     ]
-                    [ Html.text "Mannschaftsname" ]
+                    [ Html.text "Teamname" ]
                 , Html.input
                     [ Attr.type_ "text"
                     , Attr.value model.createTeamForm.name
                     , Events.onInput (\name -> CreateTeamFormUpdated { name = name, creatorName = model.createTeamForm.creatorName, otherMemberNames = model.createTeamForm.otherMemberNames, playersNeeded = model.createTeamForm.playersNeeded })
-                    , Attr.placeholder "Mannschaftsname eingeben"
+                    , Attr.placeholder "Teamname eingeben"
                     , Attr.style "width" "100%"
                     , Attr.style "padding" "0.75rem"
                     , Attr.style "border" "1px solid #d1d5db"
@@ -584,7 +584,7 @@ viewCreateTeamPage model =
                     , Attr.style "color" "#374151"
                     , Attr.style "margin-bottom" "0.5rem"
                     ]
-                    [ Html.text "Weitere Mannschaftsmitglieder (optional)" ]
+                    [ Html.text "Weitere Teammitglieder (optional)" ]
                 , Html.textarea
                     [ Attr.value model.createTeamForm.otherMemberNames
                     , Events.onInput (\names -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = model.createTeamForm.creatorName, otherMemberNames = names, playersNeeded = model.createTeamForm.playersNeeded })
@@ -652,7 +652,7 @@ viewCreateTeamPage model =
                 , Attr.style "cursor" "pointer"
                 , Attr.style "transition" "background-color 0.2s"
                 ]
-                [ Html.text "Mannschaft erstellen" ]
+                [ Html.text "Team erstellen" ]
             ]
         ]
 
@@ -733,7 +733,7 @@ viewTeamPage model =
                 [ Attr.style "text-align" "center"
                 , Attr.style "padding" "3rem 0"
                 ]
-                [ Html.text "Mannschaft wird geladen..." ]
+                [ Html.text "Team wird geladen..." ]
 
 
 viewNotFoundPage : Html FrontendMsg
@@ -1336,7 +1336,7 @@ viewMembersSection model team =
                 , Attr.style "flex" "1"
                 , Attr.style "min-width" "0"
                 ]
-                [ Html.text "Mannschaftsmitglieder" ]
+                [ Html.text "Teammitglieder" ]
             , Html.button
                 [ Events.onClick ShowCreateMemberModal
                 , Attr.style "background-color" "#10b981"
