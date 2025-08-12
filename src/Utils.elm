@@ -1,4 +1,4 @@
-module Utils exposing (createSlug, createTeamUrl, extractTeamIdFromUrl, generateMatchId, generateRandomTeamId, getAllMatches, getCurrentSeason, getSeasonHalf, sortMatchesByDate)
+module Utils exposing (createSlug, createTeamUrl, extractTeamIdFromUrl, generateMatchId, generateMemberId, generateRandomTeamId, getAllMatches, getCurrentSeason, getSeasonHalf, sortMatchesByDate)
 
 import Char
 import Dict exposing (Dict)
@@ -47,6 +47,15 @@ generateRandomTeamId seed =
 generateMatchId : Int -> String
 generateMatchId counter =
     "match-" ++ String.fromInt counter
+
+
+
+-- Generate a member ID
+
+
+generateMemberId : Int -> String
+generateMemberId counter =
+    "member-" ++ String.fromInt counter
 
 
 

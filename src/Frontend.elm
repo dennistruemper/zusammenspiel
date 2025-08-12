@@ -7,6 +7,7 @@ import Html.Attributes as Attr
 import Html.Events as Events
 import Json.Decode
 import Lamdera
+import LocalStorage
 import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
@@ -24,7 +25,7 @@ app =
         , onUrlChange = UrlChanged
         , update = update
         , updateFromBackend = updateFromBackend
-        , subscriptions = \m -> Sub.none
+        , subscriptions = \m -> LocalStorage.fromJS LocalStorageMessage
         , view = view
         }
 
@@ -39,9 +40,13 @@ init url key =
             { key = key
             , page = page
             , currentTeam = Nothing
-            , createTeamForm = { name = "" }
+            , activeMemberId = Nothing
+            , createTeamForm = { name = "", creatorName = "", otherMemberNames = "" }
             , createMatchForm = { opponent = "", date = "", time = "", venue = "", isHome = True }
+            , createMemberForm = { name = "" }
             , showCreateMatchModal = False
+            , showCreateMemberModal = False
+            , showMemberSelectionModal = False
             , matches = []
             , members = []
             , availability = []
@@ -120,12 +125,19 @@ update msg model =
             ( { model | createTeamForm = form }, Cmd.none )
 
         CreateTeamSubmitted ->
-            if String.isEmpty (String.trim model.createTeamForm.name) then
+            if String.isEmpty (String.trim model.createTeamForm.name) || String.isEmpty (String.trim model.createTeamForm.creatorName) then
                 ( model, Cmd.none )
 
             else
+                let
+                    otherMemberNames =
+                        model.createTeamForm.otherMemberNames
+                            |> String.split ","
+                            |> List.map String.trim
+                            |> List.filter (not << String.isEmpty)
+                in
                 ( model
-                , Lamdera.sendToBackend (CreateTeamRequest model.createTeamForm.name)
+                , Lamdera.sendToBackend (CreateTeamRequest model.createTeamForm.name model.createTeamForm.creatorName otherMemberNames)
                 )
 
         CreateMatchFormUpdated form ->
@@ -146,6 +158,61 @@ update msg model =
         HideCreateMatchModal ->
             ( { model | showCreateMatchModal = False }, Cmd.none )
 
+        CreateMemberFormUpdated form ->
+            ( { model | createMemberForm = form }, Cmd.none )
+
+        CreateMemberSubmitted teamId ->
+            if String.isEmpty (String.trim model.createMemberForm.name) then
+                ( model, Cmd.none )
+
+            else
+                ( { model | showCreateMemberModal = False, createMemberForm = { name = "" } }
+                , Lamdera.sendToBackend (CreateMemberRequest teamId model.createMemberForm)
+                )
+
+        ShowCreateMemberModal ->
+            ( { model | showCreateMemberModal = True }, Cmd.none )
+
+        HideCreateMemberModal ->
+            ( { model | showCreateMemberModal = False }, Cmd.none )
+
+        ShowMemberSelectionModal ->
+            ( { model | showMemberSelectionModal = True }, Cmd.none )
+
+        HideMemberSelectionModal ->
+            ( { model | showMemberSelectionModal = False }, Cmd.none )
+
+        SelectActiveMember memberId ->
+            ( { model | activeMemberId = Just memberId, showMemberSelectionModal = False }
+            , LocalStorage.toJS ("SET:" ++ memberId)
+            )
+
+        LocalStorageMessage message ->
+            if String.startsWith "LOAD:" message then
+                let
+                    memberIdPart =
+                        String.dropLeft 5 message
+
+                    maybeMemberId =
+                        if memberIdPart == "null" then
+                            Nothing
+
+                        else
+                            Just memberIdPart
+                in
+                ( { model | activeMemberId = maybeMemberId }, Cmd.none )
+
+            else
+                ( model, Cmd.none )
+
+        LogoutRequested ->
+            ( { model | activeMemberId = Nothing, page = HomePage }
+            , Cmd.batch
+                [ LocalStorage.toJS "CLEAR"
+                , Nav.pushUrl model.key "/"
+                ]
+            )
+
         NoOpFrontendMsg ->
             ( model, Cmd.none )
 
@@ -153,21 +220,35 @@ update msg model =
 updateFromBackend : ToFrontend -> Model -> ( Model, Cmd FrontendMsg )
 updateFromBackend msg model =
     case msg of
-        TeamCreated team ->
+        TeamCreated team creatorMemberId ->
             let
                 teamUrl =
                     createTeamUrl team.slug team.id
             in
-            ( { model | currentTeam = Just team }
-            , Nav.pushUrl model.key teamUrl
+            ( { model | currentTeam = Just team, activeMemberId = Just creatorMemberId }
+            , Cmd.batch
+                [ Nav.pushUrl model.key teamUrl
+                , LocalStorage.toJS ("SET:" ++ creatorMemberId)
+                ]
             )
 
         TeamLoaded team matches members availability ->
+            let
+                shouldShowMemberSelection =
+                    case model.activeMemberId of
+                        Nothing ->
+                            not (List.isEmpty members)
+
+                        Just memberId ->
+                            -- Check if the stored member ID is still valid for this team
+                            not (List.any (\member -> member.id == memberId) members)
+            in
             ( { model
                 | currentTeam = Just team
                 , matches = matches
                 , members = members
                 , availability = availability
+                , showMemberSelectionModal = shouldShowMemberSelection
               }
             , Cmd.none
             )
@@ -177,6 +258,9 @@ updateFromBackend msg model =
 
         MatchCreated match ->
             ( { model | matches = match :: model.matches }, Cmd.none )
+
+        MemberCreated member ->
+            ( { model | members = member :: model.members }, Cmd.none )
 
         NoOpToFrontend ->
             ( model, Cmd.none )
@@ -256,15 +340,56 @@ viewHeader model =
                     , Attr.style "text-decoration" "none"
                     ]
                     [ Html.text "Startseite" ]
-                , Html.a
-                    [ Attr.href "/create"
-                    , Attr.style "color" "#3b82f6"
-                    , Attr.style "text-decoration" "none"
-                    ]
-                    [ Html.text "Mannschaft erstellen" ]
+                , viewUserInfo model
                 ]
             ]
         ]
+
+
+viewUserInfo : Model -> Html FrontendMsg
+viewUserInfo model =
+    case model.activeMemberId of
+        Just memberId ->
+            let
+                memberName =
+                    model.members
+                        |> List.filter (\member -> member.id == memberId)
+                        |> List.head
+                        |> Maybe.map .name
+                        |> Maybe.withDefault "Unbekannter Nutzer"
+            in
+            Html.div
+                [ Attr.style "position" "relative"
+                , Attr.style "display" "inline-block"
+                ]
+                [ Html.button
+                    [ Events.onClick LogoutRequested
+                    , Attr.style "background" "none"
+                    , Attr.style "border" "none"
+                    , Attr.style "color" "#374151"
+                    , Attr.style "cursor" "pointer"
+                    , Attr.style "padding" "0.5rem"
+                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "font-size" "0.875rem"
+                    , Attr.style "display" "flex"
+                    , Attr.style "align-items" "center"
+                    , Attr.style "gap" "0.5rem"
+                    , Attr.style "transition" "background-color 0.2s"
+                    , Attr.style "background-color" "#f8fafc"
+                    ]
+                    [ Html.span
+                        [ Attr.style "font-weight" "500" ]
+                        [ Html.text memberName ]
+                    , Html.span
+                        [ Attr.style "color" "#64748b"
+                        , Attr.style "font-size" "0.75rem"
+                        ]
+                        [ Html.text "Abmelden" ]
+                    ]
+                ]
+
+        Nothing ->
+            Html.text ""
 
 
 viewContent : Model -> Html FrontendMsg
@@ -353,7 +478,7 @@ viewCreateTeamPage model =
                 , Html.input
                     [ Attr.type_ "text"
                     , Attr.value model.createTeamForm.name
-                    , Events.onInput (\name -> CreateTeamFormUpdated { name = name })
+                    , Events.onInput (\name -> CreateTeamFormUpdated { name = name, creatorName = model.createTeamForm.creatorName, otherMemberNames = model.createTeamForm.otherMemberNames })
                     , Attr.placeholder "Mannschaftsname eingeben"
                     , Attr.style "width" "100%"
                     , Attr.style "padding" "0.75rem"
@@ -363,6 +488,60 @@ viewCreateTeamPage model =
                     , Attr.style "box-sizing" "border-box"
                     ]
                     []
+                ]
+            , Html.div
+                [ Attr.style "margin-bottom" "1.5rem" ]
+                [ Html.label
+                    [ Attr.style "display" "block"
+                    , Attr.style "font-weight" "500"
+                    , Attr.style "color" "#374151"
+                    , Attr.style "margin-bottom" "0.5rem"
+                    ]
+                    [ Html.text "Dein Name *" ]
+                , Html.input
+                    [ Attr.type_ "text"
+                    , Attr.value model.createTeamForm.creatorName
+                    , Events.onInput (\creatorName -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = creatorName, otherMemberNames = model.createTeamForm.otherMemberNames })
+                    , Attr.placeholder "Dein Name"
+                    , Attr.style "width" "100%"
+                    , Attr.style "padding" "0.75rem"
+                    , Attr.style "border" "1px solid #d1d5db"
+                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "font-size" "1rem"
+                    , Attr.style "box-sizing" "border-box"
+                    ]
+                    []
+                ]
+            , Html.div
+                [ Attr.style "margin-bottom" "2rem" ]
+                [ Html.label
+                    [ Attr.style "display" "block"
+                    , Attr.style "font-weight" "500"
+                    , Attr.style "color" "#374151"
+                    , Attr.style "margin-bottom" "0.5rem"
+                    ]
+                    [ Html.text "Weitere Mannschaftsmitglieder (optional)" ]
+                , Html.textarea
+                    [ Attr.value model.createTeamForm.otherMemberNames
+                    , Events.onInput (\names -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = model.createTeamForm.creatorName, otherMemberNames = names })
+                    , Attr.placeholder "Namen durch Komma getrennt eingeben, z.B. Max Mustermann, Anna Schmidt, Tom Weber"
+                    , Attr.style "width" "100%"
+                    , Attr.style "padding" "0.75rem"
+                    , Attr.style "border" "1px solid #d1d5db"
+                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "font-size" "1rem"
+                    , Attr.style "min-height" "100px"
+                    , Attr.style "resize" "vertical"
+                    , Attr.style "box-sizing" "border-box"
+                    ]
+                    []
+                , Html.p
+                    [ Attr.style "color" "#6b7280"
+                    , Attr.style "font-size" "0.875rem"
+                    , Attr.style "margin-top" "0.5rem"
+                    , Attr.style "margin-bottom" "0"
+                    ]
+                    [ Html.text "Du kannst Mitglieder auch später hinzufügen." ]
                 ]
             , Html.button
                 [ Attr.type_ "submit"
@@ -394,7 +573,7 @@ viewTeamPage model =
                     , Attr.style "margin-bottom" "2rem"
                     ]
                     [ Html.text team.name ]
-                , if List.isEmpty model.matches && List.isEmpty model.members then
+                , if List.isEmpty model.matches then
                     Html.div
                         [ Attr.style "background-color" "white"
                         , Attr.style "padding" "2rem"
@@ -435,8 +614,19 @@ viewTeamPage model =
                   else
                     Html.text ""
                 , viewMatchesSection model team
+                , viewMembersSection model team
                 , if model.showCreateMatchModal then
                     viewCreateMatchModal model team
+
+                  else
+                    Html.text ""
+                , if model.showCreateMemberModal then
+                    viewCreateMemberModal model team
+
+                  else
+                    Html.text ""
+                , if model.showMemberSelectionModal then
+                    viewMemberSelectionModal model team
 
                   else
                     Html.text ""
@@ -504,6 +694,11 @@ updateMatchFormVenue venue form =
 updateMatchFormIsHome : Bool -> CreateMatchForm -> CreateMatchForm
 updateMatchFormIsHome isHome form =
     { form | isHome = isHome }
+
+
+updateMemberFormName : String -> CreateMemberForm -> CreateMemberForm
+updateMemberFormName name form =
+    { form | name = name }
 
 
 
@@ -820,5 +1015,300 @@ viewCreateMatchModal model team =
                     ]
                     [ Html.text "Spiel hinzufügen" ]
                 ]
+            ]
+        ]
+
+
+viewMembersSection : Model -> Team -> Html FrontendMsg
+viewMembersSection model team =
+    Html.div
+        [ Attr.style "margin-top" "3rem" ]
+        [ Html.div
+            [ Attr.style "display" "flex"
+            , Attr.style "justify-content" "space-between"
+            , Attr.style "align-items" "center"
+            , Attr.style "margin-bottom" "1.5rem"
+            ]
+            [ Html.h3
+                [ Attr.style "font-size" "1.5rem"
+                , Attr.style "font-weight" "600"
+                , Attr.style "color" "#1e293b"
+                , Attr.style "margin" "0"
+                ]
+                [ Html.text "Mannschaftsmitglieder" ]
+            , Html.button
+                [ Events.onClick ShowCreateMemberModal
+                , Attr.style "background-color" "#10b981"
+                , Attr.style "color" "white"
+                , Attr.style "padding" "0.5rem 1rem"
+                , Attr.style "border" "none"
+                , Attr.style "border-radius" "0.375rem"
+                , Attr.style "font-size" "0.875rem"
+                , Attr.style "font-weight" "500"
+                , Attr.style "cursor" "pointer"
+                , Attr.style "transition" "background-color 0.2s"
+                ]
+                [ Html.text "+ Mitglied hinzufügen" ]
+            ]
+        , if List.isEmpty model.members then
+            Html.div
+                [ Attr.style "background-color" "white"
+                , Attr.style "padding" "2rem"
+                , Attr.style "border-radius" "0.5rem"
+                , Attr.style "box-shadow" "0 1px 3px rgba(0,0,0,0.1)"
+                , Attr.style "text-align" "center"
+                ]
+                [ Html.p
+                    [ Attr.style "color" "#64748b" ]
+                    [ Html.text "Noch keine Mitglieder hinzugefügt. Füge das erste Mitglied hinzu!" ]
+                ]
+
+          else
+            Html.div
+                [ Attr.style "display" "grid"
+                , Attr.style "grid-template-columns" "repeat(auto-fill, minmax(300px, 1fr))"
+                , Attr.style "gap" "1rem"
+                ]
+                (List.map viewMemberCard model.members)
+        ]
+
+
+viewMemberCard : Member -> Html FrontendMsg
+viewMemberCard member =
+    Html.div
+        [ Attr.style "background-color" "white"
+        , Attr.style "border-radius" "0.5rem"
+        , Attr.style "box-shadow" "0 1px 3px rgba(0,0,0,0.1)"
+        , Attr.style "padding" "1.5rem"
+        ]
+        [ Html.div
+            [ Attr.style "display" "flex"
+            , Attr.style "align-items" "center"
+            , Attr.style "margin-bottom" "1rem"
+            ]
+            [ Html.div
+                [ Attr.style "width" "3rem"
+                , Attr.style "height" "3rem"
+                , Attr.style "border-radius" "50%"
+                , Attr.style "background-color" "#e5e7eb"
+                , Attr.style "display" "flex"
+                , Attr.style "align-items" "center"
+                , Attr.style "justify-content" "center"
+                , Attr.style "margin-right" "1rem"
+                ]
+                [ Html.span
+                    [ Attr.style "font-weight" "600"
+                    , Attr.style "color" "#374151"
+                    , Attr.style "font-size" "1.25rem"
+                    ]
+                    [ Html.text (String.left 1 member.name |> String.toUpper) ]
+                ]
+            , Html.div []
+                [ Html.h4
+                    [ Attr.style "font-weight" "600"
+                    , Attr.style "color" "#1e293b"
+                    , Attr.style "margin" "0 0 0.25rem 0"
+                    , Attr.style "font-size" "1.125rem"
+                    ]
+                    [ Html.text member.name ]
+                ]
+            ]
+        ]
+
+
+viewCreateMemberModal : Model -> Team -> Html FrontendMsg
+viewCreateMemberModal model team =
+    Html.div
+        [ Attr.style "position" "fixed"
+        , Attr.style "top" "0"
+        , Attr.style "left" "0"
+        , Attr.style "width" "100%"
+        , Attr.style "height" "100%"
+        , Attr.style "background-color" "rgba(0,0,0,0.5)"
+        , Attr.style "display" "flex"
+        , Attr.style "justify-content" "center"
+        , Attr.style "align-items" "center"
+        , Attr.style "z-index" "1000"
+        , Events.onClick HideCreateMemberModal
+        ]
+        [ Html.div
+            [ Attr.style "background-color" "white"
+            , Attr.style "border-radius" "0.5rem"
+            , Attr.style "box-shadow" "0 10px 25px rgba(0,0,0,0.25)"
+            , Attr.style "max-width" "500px"
+            , Attr.style "width" "90%"
+            , Attr.style "max-height" "90vh"
+            , Attr.style "overflow-y" "auto"
+            , Events.stopPropagationOn "click" (Json.Decode.succeed ( NoOpFrontendMsg, True ))
+            ]
+            [ Html.div
+                [ Attr.style "padding" "1.5rem"
+                , Attr.style "border-bottom" "1px solid #e5e7eb"
+                ]
+                [ Html.div
+                    [ Attr.style "display" "flex"
+                    , Attr.style "justify-content" "space-between"
+                    , Attr.style "align-items" "center"
+                    ]
+                    [ Html.h3
+                        [ Attr.style "font-size" "1.25rem"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#1e293b"
+                        , Attr.style "margin" "0"
+                        ]
+                        [ Html.text "Mitglied hinzufügen" ]
+                    , Html.button
+                        [ Events.onClick HideCreateMemberModal
+                        , Attr.style "background" "none"
+                        , Attr.style "border" "none"
+                        , Attr.style "font-size" "1.5rem"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "color" "#6b7280"
+                        ]
+                        [ Html.text "×" ]
+                    ]
+                ]
+            , Html.form
+                [ Events.onSubmit (CreateMemberSubmitted team.id)
+                , Attr.style "padding" "1.5rem"
+                ]
+                [ Html.div
+                    [ Attr.style "margin-bottom" "2rem" ]
+                    [ Html.label
+                        [ Attr.style "display" "block"
+                        , Attr.style "font-weight" "500"
+                        , Attr.style "color" "#374151"
+                        , Attr.style "margin-bottom" "0.5rem"
+                        ]
+                        [ Html.text "Name *" ]
+                    , Html.input
+                        [ Attr.type_ "text"
+                        , Attr.value model.createMemberForm.name
+                        , Events.onInput (\name -> CreateMemberFormUpdated (updateMemberFormName name model.createMemberForm))
+                        , Attr.placeholder "Name eingeben"
+                        , Attr.style "width" "100%"
+                        , Attr.style "padding" "0.75rem"
+                        , Attr.style "border" "1px solid #d1d5db"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "font-size" "1rem"
+                        , Attr.style "box-sizing" "border-box"
+                        ]
+                        []
+                    ]
+                , Html.button
+                    [ Attr.type_ "submit"
+                    , Attr.style "width" "100%"
+                    , Attr.style "background-color" "#10b981"
+                    , Attr.style "color" "white"
+                    , Attr.style "padding" "0.75rem 1.5rem"
+                    , Attr.style "border" "none"
+                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "font-size" "1rem"
+                    , Attr.style "font-weight" "500"
+                    , Attr.style "cursor" "pointer"
+                    , Attr.style "transition" "background-color 0.2s"
+                    ]
+                    [ Html.text "Mitglied hinzufügen" ]
+                ]
+            ]
+        ]
+
+
+viewMemberSelectionModal : Model -> Team -> Html FrontendMsg
+viewMemberSelectionModal model team =
+    Html.div
+        [ Attr.style "position" "fixed"
+        , Attr.style "top" "0"
+        , Attr.style "left" "0"
+        , Attr.style "width" "100%"
+        , Attr.style "height" "100%"
+        , Attr.style "background-color" "rgba(0,0,0,0.5)"
+        , Attr.style "display" "flex"
+        , Attr.style "justify-content" "center"
+        , Attr.style "align-items" "center"
+        , Attr.style "z-index" "1000"
+        ]
+        [ Html.div
+            [ Attr.style "background-color" "white"
+            , Attr.style "border-radius" "0.5rem"
+            , Attr.style "box-shadow" "0 10px 25px rgba(0,0,0,0.25)"
+            , Attr.style "max-width" "500px"
+            , Attr.style "width" "90%"
+            , Attr.style "max-height" "90vh"
+            , Attr.style "overflow-y" "auto"
+            ]
+            [ Html.div
+                [ Attr.style "padding" "1.5rem"
+                , Attr.style "border-bottom" "1px solid #e5e7eb"
+                ]
+                [ Html.h3
+                    [ Attr.style "font-size" "1.25rem"
+                    , Attr.style "font-weight" "600"
+                    , Attr.style "color" "#1e293b"
+                    , Attr.style "margin" "0"
+                    , Attr.style "text-align" "center"
+                    ]
+                    [ Html.text "Wer bist du?" ]
+                , Html.p
+                    [ Attr.style "color" "#64748b"
+                    , Attr.style "margin-top" "0.5rem"
+                    , Attr.style "margin-bottom" "0"
+                    , Attr.style "text-align" "center"
+                    ]
+                    [ Html.text "Wähle deinen Namen aus der Liste der Mannschaftsmitglieder." ]
+                ]
+            , Html.div
+                [ Attr.style "padding" "1.5rem" ]
+                [ Html.div
+                    [ Attr.style "display" "grid"
+                    , Attr.style "gap" "0.75rem"
+                    ]
+                    (List.map viewMemberSelectionItem model.members)
+                ]
+            ]
+        ]
+
+
+viewMemberSelectionItem : Member -> Html FrontendMsg
+viewMemberSelectionItem member =
+    Html.button
+        [ Events.onClick (SelectActiveMember member.id)
+        , Attr.style "width" "100%"
+        , Attr.style "padding" "1rem"
+        , Attr.style "border" "1px solid #e5e7eb"
+        , Attr.style "border-radius" "0.375rem"
+        , Attr.style "background-color" "white"
+        , Attr.style "cursor" "pointer"
+        , Attr.style "transition" "all 0.2s"
+        , Attr.style "text-align" "left"
+        , Attr.style "display" "flex"
+        , Attr.style "align-items" "center"
+        , Attr.style "gap" "1rem"
+        ]
+        [ Html.div
+            [ Attr.style "width" "2.5rem"
+            , Attr.style "height" "2.5rem"
+            , Attr.style "border-radius" "50%"
+            , Attr.style "background-color" "#e5e7eb"
+            , Attr.style "display" "flex"
+            , Attr.style "align-items" "center"
+            , Attr.style "justify-content" "center"
+            , Attr.style "flex-shrink" "0"
+            ]
+            [ Html.span
+                [ Attr.style "font-weight" "600"
+                , Attr.style "color" "#374151"
+                , Attr.style "font-size" "1.125rem"
+                ]
+                [ Html.text (String.left 1 member.name |> String.toUpper) ]
+            ]
+        , Html.div []
+            [ Html.h4
+                [ Attr.style "font-weight" "600"
+                , Attr.style "color" "#1e293b"
+                , Attr.style "margin" "0"
+                , Attr.style "font-size" "1rem"
+                ]
+                [ Html.text member.name ]
             ]
         ]

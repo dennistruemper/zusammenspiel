@@ -1,0 +1,29 @@
+// LocalStorage functionality for Lamdera
+// Following elm-pkg-js standards
+
+exports.init = async function (app) {
+  // Send initial active member ID to Elm
+  const storedMemberId = localStorage.getItem("activeMemberId");
+  if (storedMemberId) {
+    app.ports.fromJS.send("LOAD:" + storedMemberId);
+  } else {
+    app.ports.fromJS.send("LOAD:null");
+  }
+
+  // Listen for commands from Elm
+  app.ports.toJS.subscribe(function (message) {
+    if (message.startsWith("SET:")) {
+      const memberId = message.substring(4);
+      localStorage.setItem("activeMemberId", memberId);
+    } else if (message === "CLEAR") {
+      localStorage.removeItem("activeMemberId");
+    } else if (message === "GET") {
+      const memberId = localStorage.getItem("activeMemberId");
+      if (memberId) {
+        app.ports.fromJS.send("LOAD:" + memberId);
+      } else {
+        app.ports.fromJS.send("LOAD:null");
+      }
+    }
+  });
+};

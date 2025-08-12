@@ -5,7 +5,7 @@ import Lamdera exposing (ClientId, SessionId, sendToFrontend)
 import Random
 import Time
 import Types exposing (..)
-import Utils exposing (createSlug, generateMatchId, generateRandomTeamId, getAllMatches, getCurrentSeason, getSeasonHalf)
+import Utils exposing (createSlug, generateMatchId, generateMemberId, generateRandomTeamId, getAllMatches, getCurrentSeason, getSeasonHalf)
 
 
 type alias Model =
@@ -41,7 +41,7 @@ update msg model =
 updateFromFrontend : SessionId -> ClientId -> ToBackend -> Model -> ( Model, Cmd BackendMsg )
 updateFromFrontend sessionId clientId msg model =
     case msg of
-        CreateTeamRequest name ->
+        CreateTeamRequest name creatorName otherMemberNames ->
             let
                 timestamp =
                     Time.posixToMillis (Time.millisToPosix model.nextId)
@@ -59,22 +59,55 @@ updateFromFrontend sessionId clientId msg model =
                     , createdAt = timestamp
                     }
 
+                -- Create creator member first
+                creatorMemberId =
+                    generateMemberId model.nextId
+
+                creatorMember =
+                    { id = creatorMemberId
+                    , teamId = teamId
+                    , name = creatorName
+                    }
+
+                -- Create other members
+                ( otherMembers, nextId ) =
+                    List.foldl
+                        (\memberName ( memberDict, idCounter ) ->
+                            let
+                                memberId =
+                                    generateMemberId idCounter
+
+                                member =
+                                    { id = memberId
+                                    , teamId = teamId
+                                    , name = memberName
+                                    }
+                            in
+                            ( Dict.insert memberId member memberDict, idCounter + 1 )
+                        )
+                        ( Dict.empty, model.nextId + 1 )
+                        otherMemberNames
+
+                -- Combine all members (creator + others)
+                allMembers =
+                    Dict.insert creatorMemberId creatorMember otherMembers
+
                 newTeamData =
                     { team = newTeam
                     , seasons = Dict.empty
-                    , members = Dict.empty
+                    , members = allMembers
                     , availability = Dict.empty
                     }
 
                 updatedModel =
                     { model
                         | teams = Dict.insert teamId newTeamData model.teams
-                        , nextId = model.nextId + 1
+                        , nextId = nextId
                         , randomSeed = newSeed
                     }
             in
             ( updatedModel
-            , sendToFrontend clientId (TeamCreated newTeam)
+            , sendToFrontend clientId (TeamCreated newTeam creatorMemberId)
             )
 
         GetTeamRequest teamId ->
@@ -187,6 +220,37 @@ updateFromFrontend sessionId clientId msg model =
                     in
                     ( updatedModel
                     , sendToFrontend clientId (MatchCreated newMatch)
+                    )
+
+                Nothing ->
+                    ( model
+                    , sendToFrontend clientId TeamNotFound
+                    )
+
+        CreateMemberRequest teamId memberForm ->
+            case Dict.get teamId model.teams of
+                Just teamData ->
+                    let
+                        memberId =
+                            generateMemberId model.nextId
+
+                        newMember =
+                            { id = memberId
+                            , teamId = teamId
+                            , name = memberForm.name
+                            }
+
+                        updatedTeamData =
+                            { teamData | members = Dict.insert memberId newMember teamData.members }
+
+                        updatedModel =
+                            { model
+                                | teams = Dict.insert teamId updatedTeamData model.teams
+                                , nextId = model.nextId + 1
+                            }
+                    in
+                    ( updatedModel
+                    , sendToFrontend clientId (MemberCreated newMember)
                     )
 
                 Nothing ->

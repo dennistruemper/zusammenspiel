@@ -91,12 +91,16 @@ type alias FrontendModel =
     { key : Key
     , page : Page
     , currentTeam : Maybe Team
+    , activeMemberId : Maybe String
     , createTeamForm : CreateTeamForm
     , createMatchForm : CreateMatchForm
+    , createMemberForm : CreateMemberForm
     , matches : List Match
     , members : List Member
     , availability : List AvailabilityRecord
     , showCreateMatchModal : Bool
+    , showCreateMemberModal : Bool
+    , showMemberSelectionModal : Bool
     }
 
 
@@ -109,6 +113,8 @@ type Page
 
 type alias CreateTeamForm =
     { name : String
+    , creatorName : String
+    , otherMemberNames : String
     }
 
 
@@ -118,6 +124,11 @@ type alias CreateMatchForm =
     , time : String
     , venue : String
     , isHome : Bool
+    }
+
+
+type alias CreateMemberForm =
+    { name : String
     }
 
 
@@ -145,13 +156,23 @@ type FrontendMsg
     | CreateMatchSubmitted TeamId
     | ShowCreateMatchModal
     | HideCreateMatchModal
+    | CreateMemberFormUpdated CreateMemberForm
+    | CreateMemberSubmitted TeamId
+    | ShowCreateMemberModal
+    | HideCreateMemberModal
+    | ShowMemberSelectionModal
+    | HideMemberSelectionModal
+    | SelectActiveMember String
+    | LocalStorageMessage String
+    | LogoutRequested
     | NoOpFrontendMsg
 
 
 type ToBackend
-    = CreateTeamRequest String
+    = CreateTeamRequest String String (List String)
     | GetTeamRequest TeamId
     | CreateMatchRequest TeamId CreateMatchForm
+    | CreateMemberRequest TeamId CreateMemberForm
     | NoOpToBackend
 
 
@@ -160,8 +181,9 @@ type BackendMsg
 
 
 type ToFrontend
-    = TeamCreated Team
+    = TeamCreated Team String -- Team and creator member ID
     | TeamLoaded Team (List Match) (List Member) (List AvailabilityRecord)
     | TeamNotFound
     | MatchCreated Match
+    | MemberCreated Member
     | NoOpToFrontend
