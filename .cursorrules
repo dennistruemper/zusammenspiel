@@ -1,0 +1,143 @@
+# Cursor Rules for Lamdera Elm Development with Tailwind
+
+## Project Overview
+
+This is a Lamdera Elm project using Tailwind CSS for styling. Lamdera is a full-stack Elm platform that handles both frontend and backend development with real-time synchronization.
+
+## Language and Framework Guidelines
+
+### Elm Code Style
+
+- Use 4-space indentation consistently
+- Follow Elm naming conventions (camelCase for functions/variables, PascalCase for types)
+- Prefer explicit type annotations for top-level functions
+- Use descriptive function and variable names
+- Keep functions small and focused on a single responsibility
+- Use `let..in` expressions for local bindings
+- Avoid deeply nested case expressions; extract to separate functions when needed
+
+### Lamdera Specific
+
+- Follow Lamdera's architecture patterns with `Types.elm`, `Frontend.elm`, and `Backend.elm`
+- Use `Lamdera.sendToBackend` and `Lamdera.sendToFrontend` for client-server communication
+- Properly handle `ToBackend`, `ToFrontend`, `BackendMsg`, and `FrontendMsg` message types
+- Use `Env.elm` for environment-specific configuration
+- Leverage Lamdera's automatic serialization - avoid manual JSON encoding/decoding when possible
+
+### Tailwind CSS
+
+- Use Tailwind utility classes for styling
+- Prefer utility classes over custom CSS when possible
+- Use responsive design classes (sm:, md:, lg:, xl:, 2xl:) appropriately
+- Leverage Tailwind's color palette and spacing system
+- Use semantic class combinations for component-like styling
+- Consider using `@apply` directive in custom CSS only when absolutely necessary
+
+## Code Organization
+
+### File Structure
+
+- Keep `Types.elm` focused on type definitions and shared data structures
+- Place view functions in appropriate modules (consider `View/` directory for complex UIs)
+- Use meaningful module names that reflect their purpose
+- Group related functionality into modules
+
+### Type Safety
+
+- Leverage Elm's type system to prevent runtime errors
+- Use custom types instead of primitives when domain modeling
+- Make impossible states impossible through type design
+- Use `Maybe` and `Result` types appropriately for error handling
+
+## Development Practices
+
+### Error Handling
+
+- Handle all possible cases in pattern matching
+- Use descriptive error messages
+- Prefer `Result` over exceptions for recoverable errors
+- Use `Maybe` for optional values
+
+### Performance
+
+- Be mindful of expensive operations in view functions
+- Use `Html.Lazy` for performance optimization when appropriate
+- Avoid creating functions inside view functions
+
+### Testing
+
+- Write unit tests for business logic
+- Use property-based testing where appropriate
+- Test both happy path and edge cases
+
+## Dependencies and Package Management
+
+### Dependency Rules
+
+**CRITICAL: Only introduce new Elm packages or dependencies after explicit discussion and approval.**
+
+Before adding any new dependency:
+
+1. Discuss the need with the team/reviewer
+2. Evaluate if the functionality can be implemented with existing dependencies
+3. Consider the package's maintenance status and community support
+4. Assess the impact on bundle size and compilation time
+5. Document the reason for adding the dependency
+
+### Common Approved Packages
+
+The following packages are typically acceptable for Lamdera projects:
+
+- Core Elm packages (elm/core, elm/html, elm/http, etc.)
+- elm/json for JSON handling
+- elm/time for time operations
+- elm/uuid for unique identifiers
+- lamdera/core (automatically included)
+
+### Package Evaluation Criteria
+
+When discussing new dependencies, consider:
+
+- Is it actively maintained?
+- Does it follow Elm design principles?
+- Is the API well-designed and stable?
+- Are there lighter alternatives?
+- Is it really necessary vs. implementing the feature ourselves?
+
+## Code Review Guidelines
+
+### What to Look For
+
+- Type safety and proper error handling
+- Adherence to Elm conventions
+- Proper use of Lamdera's message passing
+- Effective use of Tailwind classes
+- Code clarity and maintainability
+- Performance considerations
+
+### Common Issues to Avoid
+
+- Overly complex view functions
+- Missing type annotations on public functions
+- Inconsistent formatting
+- Unused imports or variables
+- Anti-patterns like deeply nested conditionals
+
+## Development Workflow
+
+### Before Committing
+
+- Run `lamdera make` to ensure compilation
+- Check for unused imports with `elm-review`
+- Ensure all pattern matches are exhaustive
+- Verify Tailwind classes are being used effectively
+- Test the feature in both development and production builds
+
+### Documentation
+
+- Document complex business logic
+- Add comments for non-obvious type decisions
+- Keep README updated with setup instructions
+- Document any custom Tailwind configurations
+
+Remember: Elm's compiler is your friend - let it guide you toward correct, maintainable code!
