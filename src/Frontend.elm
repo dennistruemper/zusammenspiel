@@ -41,24 +41,29 @@ init url key =
             , page = page
             , currentTeam = Nothing
             , activeMemberId = Nothing
-            , createTeamForm = { name = "", creatorName = "", otherMemberNames = "" }
+            , createTeamForm = { name = "", creatorName = "", otherMemberNames = "", playersNeeded = "" }
             , createMatchForm = { opponent = "", date = "", time = "", venue = "", isHome = True }
             , createMemberForm = { name = "" }
             , showCreateMatchModal = False
             , showCreateMemberModal = False
             , showMemberSelectionModal = False
+            , expandedMatches = []
             , matches = []
             , members = []
             , availability = []
+            , hostname = Nothing
             }
 
         cmd =
             case page of
                 TeamPage teamId ->
-                    Lamdera.sendToBackend (GetTeamRequest teamId)
+                    Cmd.batch
+                        [ LocalStorage.toJS "GET_HOSTNAME"
+                        , Lamdera.sendToBackend (GetTeamRequest teamId)
+                        ]
 
                 _ ->
-                    Cmd.none
+                    LocalStorage.toJS "GET_HOSTNAME"
     in
     ( initialModel, cmd )
 
@@ -125,7 +130,7 @@ update msg model =
             ( { model | createTeamForm = form }, Cmd.none )
 
         CreateTeamSubmitted ->
-            if String.isEmpty (String.trim model.createTeamForm.name) || String.isEmpty (String.trim model.createTeamForm.creatorName) then
+            if String.isEmpty (String.trim model.createTeamForm.name) || String.isEmpty (String.trim model.createTeamForm.creatorName) || String.isEmpty (String.trim model.createTeamForm.playersNeeded) then
                 ( model, Cmd.none )
 
             else
@@ -135,9 +140,15 @@ update msg model =
                             |> String.split ","
                             |> List.map String.trim
                             |> List.filter (not << String.isEmpty)
+
+                    playersNeeded =
+                        String.toInt (String.trim model.createTeamForm.playersNeeded)
+                            |> Maybe.withDefault 11
+
+                    -- Default to 11 if invalid
                 in
                 ( model
-                , Lamdera.sendToBackend (CreateTeamRequest model.createTeamForm.name model.createTeamForm.creatorName otherMemberNames)
+                , Lamdera.sendToBackend (CreateTeamRequest model.createTeamForm.name model.createTeamForm.creatorName otherMemberNames playersNeeded)
                 )
 
         CreateMatchFormUpdated form ->
@@ -202,6 +213,13 @@ update msg model =
                 in
                 ( { model | activeMemberId = maybeMemberId }, Cmd.none )
 
+            else if String.startsWith "HOSTNAME:" message then
+                let
+                    hostname =
+                        String.dropLeft 9 message
+                in
+                ( { model | hostname = Just hostname }, Cmd.none )
+
             else
                 ( model, Cmd.none )
 
@@ -212,6 +230,31 @@ update msg model =
                 , Nav.pushUrl model.key "/"
                 ]
             )
+
+        SetAvailability memberId matchId availability ->
+            case model.activeMemberId of
+                Just activeMemberId ->
+                    if activeMemberId == memberId then
+                        ( model
+                        , Lamdera.sendToBackend (UpdateAvailabilityRequest memberId matchId availability)
+                        )
+
+                    else
+                        ( model, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        ToggleMatchDetails matchId ->
+            let
+                updatedExpandedMatches =
+                    if List.member matchId model.expandedMatches then
+                        List.filter ((/=) matchId) model.expandedMatches
+
+                    else
+                        matchId :: model.expandedMatches
+            in
+            ( { model | expandedMatches = updatedExpandedMatches }, Cmd.none )
 
         NoOpFrontendMsg ->
             ( model, Cmd.none )
@@ -262,6 +305,16 @@ updateFromBackend msg model =
         MemberCreated member ->
             ( { model | members = member :: model.members }, Cmd.none )
 
+        AvailabilityUpdated availabilityRecord ->
+            let
+                updatedAvailability =
+                    -- Remove any existing record for this member/match combination first
+                    model.availability
+                        |> List.filter (\record -> not (record.memberId == availabilityRecord.memberId && record.matchId == availabilityRecord.matchId))
+                        |> (::) availabilityRecord
+            in
+            ( { model | availability = updatedAvailability }, Cmd.none )
+
         NoOpToFrontend ->
             ( model, Cmd.none )
 
@@ -269,7 +322,14 @@ updateFromBackend msg model =
 view : Model -> Browser.Document FrontendMsg
 view model =
     { title = getPageTitle model
-    , body = [ viewPage model ]
+    , body =
+        [ Html.node "meta"
+            [ Attr.attribute "name" "viewport"
+            , Attr.attribute "content" "width=device-width, initial-scale=1.0"
+            ]
+            []
+        , viewPage model
+        ]
     }
 
 
@@ -301,11 +361,13 @@ viewPage model =
         , Attr.style "font-family" "system-ui, -apple-system, sans-serif"
         , Attr.style "background-color" "#f8fafc"
         ]
-        [ viewHeader model
+        [ -- Mobile viewport meta tag would go in document head, but we'll handle responsive design with CSS
+          viewHeader model
         , Html.main_
             [ Attr.style "max-width" "1200px"
             , Attr.style "margin" "0 auto"
-            , Attr.style "padding" "2rem"
+            , Attr.style "padding" "1rem"
+            , Attr.style "@media (min-width: 768px)" "padding: 2rem"
             ]
             [ viewContent model ]
         ]
@@ -316,7 +378,7 @@ viewHeader model =
     Html.header
         [ Attr.style "background-color" "white"
         , Attr.style "border-bottom" "1px solid #e2e8f0"
-        , Attr.style "padding" "1rem 2rem"
+        , Attr.style "padding" "0.75rem 1rem"
         ]
         [ Html.div
             [ Attr.style "max-width" "1200px"
@@ -324,23 +386,24 @@ viewHeader model =
             , Attr.style "display" "flex"
             , Attr.style "justify-content" "space-between"
             , Attr.style "align-items" "center"
+            , Attr.style "flex-wrap" "wrap"
+            , Attr.style "gap" "0.5rem"
             ]
             [ Html.h1
-                [ Attr.style "font-size" "1.5rem"
+                [ Attr.style "font-size" "1.25rem"
                 , Attr.style "font-weight" "600"
                 , Attr.style "color" "#1e293b"
                 , Attr.style "margin" "0"
+                , Attr.style "flex-shrink" "0"
                 ]
-                [ Html.text "Mannschafts-Manager" ]
-            , Html.nav []
-                [ Html.a
-                    [ Attr.href "/"
-                    , Attr.style "margin-right" "1rem"
-                    , Attr.style "color" "#3b82f6"
-                    , Attr.style "text-decoration" "none"
-                    ]
-                    [ Html.text "Startseite" ]
-                , viewUserInfo model
+                [ Html.text "Team" ]
+            , Html.nav
+                [ Attr.style "display" "flex"
+                , Attr.style "align-items" "center"
+                , Attr.style "gap" "0.75rem"
+                , Attr.style "flex-wrap" "wrap"
+                ]
+                [ viewUserInfo model
                 ]
             ]
         ]
@@ -368,7 +431,8 @@ viewUserInfo model =
                     , Attr.style "border" "none"
                     , Attr.style "color" "#374151"
                     , Attr.style "cursor" "pointer"
-                    , Attr.style "padding" "0.5rem"
+                    , Attr.style "padding" "0.5rem 0.75rem"
+                    , Attr.style "min-height" "44px" -- iOS minimum touch target
                     , Attr.style "border-radius" "0.375rem"
                     , Attr.style "font-size" "0.875rem"
                     , Attr.style "display" "flex"
@@ -478,7 +542,7 @@ viewCreateTeamPage model =
                 , Html.input
                     [ Attr.type_ "text"
                     , Attr.value model.createTeamForm.name
-                    , Events.onInput (\name -> CreateTeamFormUpdated { name = name, creatorName = model.createTeamForm.creatorName, otherMemberNames = model.createTeamForm.otherMemberNames })
+                    , Events.onInput (\name -> CreateTeamFormUpdated { name = name, creatorName = model.createTeamForm.creatorName, otherMemberNames = model.createTeamForm.otherMemberNames, playersNeeded = model.createTeamForm.playersNeeded })
                     , Attr.placeholder "Mannschaftsname eingeben"
                     , Attr.style "width" "100%"
                     , Attr.style "padding" "0.75rem"
@@ -501,7 +565,7 @@ viewCreateTeamPage model =
                 , Html.input
                     [ Attr.type_ "text"
                     , Attr.value model.createTeamForm.creatorName
-                    , Events.onInput (\creatorName -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = creatorName, otherMemberNames = model.createTeamForm.otherMemberNames })
+                    , Events.onInput (\creatorName -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = creatorName, otherMemberNames = model.createTeamForm.otherMemberNames, playersNeeded = model.createTeamForm.playersNeeded })
                     , Attr.placeholder "Dein Name"
                     , Attr.style "width" "100%"
                     , Attr.style "padding" "0.75rem"
@@ -523,7 +587,7 @@ viewCreateTeamPage model =
                     [ Html.text "Weitere Mannschaftsmitglieder (optional)" ]
                 , Html.textarea
                     [ Attr.value model.createTeamForm.otherMemberNames
-                    , Events.onInput (\names -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = model.createTeamForm.creatorName, otherMemberNames = names })
+                    , Events.onInput (\names -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = model.createTeamForm.creatorName, otherMemberNames = names, playersNeeded = model.createTeamForm.playersNeeded })
                     , Attr.placeholder "Namen durch Komma getrennt eingeben, z.B. Max Mustermann, Anna Schmidt, Tom Weber"
                     , Attr.style "width" "100%"
                     , Attr.style "padding" "0.75rem"
@@ -542,6 +606,38 @@ viewCreateTeamPage model =
                     , Attr.style "margin-bottom" "0"
                     ]
                     [ Html.text "Du kannst Mitglieder auch später hinzufügen." ]
+                ]
+            , Html.div
+                [ Attr.style "margin-bottom" "2rem" ]
+                [ Html.label
+                    [ Attr.style "display" "block"
+                    , Attr.style "font-weight" "500"
+                    , Attr.style "color" "#374151"
+                    , Attr.style "margin-bottom" "0.5rem"
+                    ]
+                    [ Html.text "Anzahl benötigter Spieler pro Spiel *" ]
+                , Html.input
+                    [ Attr.type_ "number"
+                    , Attr.value model.createTeamForm.playersNeeded
+                    , Events.onInput (\playersNeeded -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = model.createTeamForm.creatorName, otherMemberNames = model.createTeamForm.otherMemberNames, playersNeeded = playersNeeded })
+                    , Attr.placeholder "z.B. 11 für Fußball, 6 für Volleyball"
+                    , Attr.min "1"
+                    , Attr.max "50"
+                    , Attr.style "width" "100%"
+                    , Attr.style "padding" "0.75rem"
+                    , Attr.style "border" "1px solid #d1d5db"
+                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "font-size" "1rem"
+                    , Attr.style "box-sizing" "border-box"
+                    ]
+                    []
+                , Html.p
+                    [ Attr.style "color" "#6b7280"
+                    , Attr.style "font-size" "0.875rem"
+                    , Attr.style "margin-top" "0.5rem"
+                    , Attr.style "margin-bottom" "0"
+                    ]
+                    [ Html.text "Diese Zahl bestimmt, wann ein Spiel als 'einsatzbereit' gilt." ]
                 ]
             , Html.button
                 [ Attr.type_ "submit"
@@ -602,7 +698,7 @@ viewTeamPage model =
                             , Attr.style "font-size" "0.9rem"
                             , Attr.style "word-break" "break-all"
                             ]
-                            [ Html.text ("https://your-domain.lamdera.app" ++ createTeamUrl team.slug team.id) ]
+                            [ Html.text (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id) ]
                         , Html.p
                             [ Attr.style "color" "#64748b"
                             , Attr.style "margin-top" "1rem"
@@ -702,37 +798,181 @@ updateMemberFormName name form =
 
 
 
+-- AVAILABILITY HELPERS
+
+
+getMemberAvailabilityForMatch : String -> String -> List AvailabilityRecord -> Maybe Availability
+getMemberAvailabilityForMatch memberId matchId availability =
+    availability
+        |> List.filter (\record -> record.memberId == memberId && record.matchId == matchId)
+        |> List.head
+        |> Maybe.map .availability
+
+
+availabilityToString : Availability -> String
+availabilityToString availability =
+    case availability of
+        Available ->
+            "Verfügbar"
+
+        NotAvailable ->
+            "Nicht verfügbar"
+
+        Maybe ->
+            "Vielleicht"
+
+
+availabilityToColor : Availability -> String
+availabilityToColor availability =
+    case availability of
+        Available ->
+            "#10b981"
+
+        NotAvailable ->
+            "#ef4444"
+
+        Maybe ->
+            "#f59e0b"
+
+
+type alias AvailabilitySummary =
+    { available : Int
+    , notAvailable : Int
+    , maybe : Int
+    , total : Int
+    }
+
+
+type MatchStatus
+    = Ready -- Available >= playersNeeded (Green)
+    | Possible -- Available + Maybe >= playersNeeded (Yellow)
+    | NotReady -- Available + Maybe < playersNeeded (Red)
+
+
+getMatchStatus : String -> List Member -> List AvailabilityRecord -> Int -> MatchStatus
+getMatchStatus matchId members availability playersNeeded =
+    let
+        summary =
+            getMatchAvailabilitySummary matchId members availability
+    in
+    if summary.available >= playersNeeded then
+        Ready
+
+    else if summary.available + summary.maybe >= playersNeeded then
+        Possible
+
+    else
+        NotReady
+
+
+matchStatusToColor : MatchStatus -> String
+matchStatusToColor status =
+    case status of
+        Ready ->
+            "#10b981"
+
+        -- Green
+        Possible ->
+            "#f59e0b"
+
+        -- Yellow/Orange
+        NotReady ->
+            "#ef4444"
+
+
+
+-- Red
+
+
+matchStatusToBackgroundColor : MatchStatus -> String
+matchStatusToBackgroundColor status =
+    case status of
+        Ready ->
+            "#dcfce7"
+
+        -- Light green
+        Possible ->
+            "#fef3c7"
+
+        -- Light yellow
+        NotReady ->
+            "#fee2e2"
+
+
+
+-- Light red
+
+
+getMatchAvailabilitySummary : String -> List Member -> List AvailabilityRecord -> AvailabilitySummary
+getMatchAvailabilitySummary matchId members availability =
+    let
+        memberAvailability =
+            members
+                |> List.map
+                    (\member ->
+                        availability
+                            |> List.filter (\record -> record.memberId == member.id && record.matchId == matchId)
+                            |> List.head
+                            |> Maybe.map .availability
+                    )
+
+        available =
+            memberAvailability |> List.filter ((==) (Just Available)) |> List.length
+
+        notAvailable =
+            memberAvailability |> List.filter ((==) (Just NotAvailable)) |> List.length
+
+        maybe =
+            memberAvailability |> List.filter ((==) (Just Maybe)) |> List.length
+
+        total =
+            List.length members
+    in
+    { available = available
+    , notAvailable = notAvailable
+    , maybe = maybe
+    , total = total
+    }
+
+
+
 -- TEAM PAGE HELPERS
 
 
 viewMatchesSection : Model -> Team -> Html FrontendMsg
 viewMatchesSection model team =
     Html.div
-        [ Attr.style "margin-top" "3rem" ]
+        [ Attr.style "margin-top" "2rem" ]
         [ Html.div
             [ Attr.style "display" "flex"
             , Attr.style "justify-content" "space-between"
-            , Attr.style "align-items" "center"
-            , Attr.style "margin-bottom" "1.5rem"
+            , Attr.style "align-items" "flex-start"
+            , Attr.style "margin-bottom" "1rem"
+            , Attr.style "gap" "1rem"
+            , Attr.style "flex-wrap" "wrap"
             ]
             [ Html.h3
-                [ Attr.style "font-size" "1.5rem"
+                [ Attr.style "font-size" "1.25rem"
                 , Attr.style "font-weight" "600"
                 , Attr.style "color" "#1e293b"
                 , Attr.style "margin" "0"
+                , Attr.style "flex" "1"
+                , Attr.style "min-width" "0"
                 ]
                 [ Html.text "Spiele" ]
             , Html.button
                 [ Events.onClick ShowCreateMatchModal
                 , Attr.style "background-color" "#3b82f6"
                 , Attr.style "color" "white"
-                , Attr.style "padding" "0.5rem 1rem"
+                , Attr.style "padding" "0.75rem 1rem"
                 , Attr.style "border" "none"
-                , Attr.style "border-radius" "0.375rem"
+                , Attr.style "border-radius" "0.5rem"
                 , Attr.style "font-size" "0.875rem"
                 , Attr.style "font-weight" "500"
                 , Attr.style "cursor" "pointer"
                 , Attr.style "transition" "background-color 0.2s"
+                , Attr.style "min-height" "44px"
+                , Attr.style "flex-shrink" "0"
                 ]
                 [ Html.text "+ Spiel hinzufügen" ]
             ]
@@ -756,74 +996,129 @@ viewMatchesSection model team =
                 , Attr.style "box-shadow" "0 1px 3px rgba(0,0,0,0.1)"
                 , Attr.style "overflow" "hidden"
                 ]
-                (List.map viewMatchItem model.matches)
+                (List.map (viewMatchItem model team) model.matches)
         ]
 
 
-viewMatchItem : Match -> Html FrontendMsg
-viewMatchItem match =
+viewMatchItem : Model -> Team -> Match -> Html FrontendMsg
+viewMatchItem model team match =
+    let
+        isExpanded =
+            List.member match.id model.expandedMatches
+
+        matchStatus =
+            getMatchStatus match.id model.members model.availability team.playersNeeded
+
+        statusBackgroundColor =
+            matchStatusToBackgroundColor matchStatus
+
+        statusBorderColor =
+            matchStatusToColor matchStatus
+    in
     Html.div
-        [ Attr.style "padding" "1rem 1.5rem"
-        , Attr.style "border-bottom" "1px solid #e2e8f0"
+        [ Attr.style "border-bottom" "1px solid #e2e8f0"
+        , Attr.style "border-left" ("4px solid " ++ statusBorderColor)
+        , Attr.style "background-color" statusBackgroundColor
         ]
         [ Html.div
-            [ Attr.style "display" "flex"
-            , Attr.style "justify-content" "space-between"
-            , Attr.style "align-items" "center"
+            [ Attr.style "padding" "1rem 1.5rem"
+            , Attr.style "cursor" "pointer"
+            , Events.onClick (ToggleMatchDetails match.id)
             ]
-            [ Html.div []
-                [ Html.h4
-                    [ Attr.style "font-weight" "600"
-                    , Attr.style "color" "#1e293b"
-                    , Attr.style "margin" "0 0 0.25rem 0"
-                    ]
-                    [ Html.text
-                        (if match.isHome then
-                            "vs " ++ match.opponent
-
-                         else
-                            "@ " ++ match.opponent
-                        )
-                    ]
-                , Html.p
-                    [ Attr.style "color" "#64748b"
-                    , Attr.style "margin" "0"
-                    , Attr.style "font-size" "0.875rem"
-                    ]
-                    [ Html.text (match.date ++ " um " ++ match.time ++ " - " ++ match.venue) ]
+            [ Html.div
+                [ Attr.style "display" "flex"
+                , Attr.style "flex-direction" "column"
+                , Attr.style "gap" "0.75rem"
                 ]
-            , Html.div
-                [ Attr.style "text-align" "right" ]
-                [ Html.span
-                    [ Attr.style "background-color"
-                        (if match.isHome then
-                            "#dcfce7"
-
-                         else
-                            "#fef3c7"
-                        )
-                    , Attr.style "color"
-                        (if match.isHome then
-                            "#166534"
-
-                         else
-                            "#92400e"
-                        )
-                    , Attr.style "padding" "0.25rem 0.5rem"
-                    , Attr.style "border-radius" "0.375rem"
-                    , Attr.style "font-size" "0.75rem"
-                    , Attr.style "font-weight" "500"
+                [ Html.div
+                    [ Attr.style "display" "flex"
+                    , Attr.style "justify-content" "space-between"
+                    , Attr.style "align-items" "flex-start"
+                    , Attr.style "gap" "1rem"
+                    , Attr.style "flex-wrap" "wrap"
                     ]
-                    [ Html.text
-                        (if match.isHome then
-                            "Heim"
+                    [ Html.div
+                        [ Attr.style "flex" "1"
+                        , Attr.style "min-width" "200px"
+                        ]
+                        [ Html.h4
+                            [ Attr.style "font-weight" "600"
+                            , Attr.style "color" "#1e293b"
+                            , Attr.style "margin" "0 0 0.25rem 0"
+                            ]
+                            [ Html.text
+                                (if match.isHome then
+                                    "vs " ++ match.opponent
 
-                         else
-                            "Auswärts"
-                        )
+                                 else
+                                    "@ " ++ match.opponent
+                                )
+                            ]
+                        , Html.p
+                            [ Attr.style "color" "#64748b"
+                            , Attr.style "margin" "0 0 0.5rem 0"
+                            , Attr.style "font-size" "0.875rem"
+                            ]
+                            [ Html.text (match.date ++ " um " ++ match.time) ]
+                        , Html.p
+                            [ Attr.style "color" "#64748b"
+                            , Attr.style "margin" "0 0 0.5rem 0"
+                            , Attr.style "font-size" "0.875rem"
+                            ]
+                            [ Html.text match.venue ]
+                        ]
+                    , Html.div
+                        [ Attr.style "display" "flex"
+                        , Attr.style "flex-direction" "column"
+                        , Attr.style "align-items" "flex-end"
+                        , Attr.style "gap" "0.5rem"
+                        ]
+                        [ Html.span
+                            [ Attr.style "background-color"
+                                (if match.isHome then
+                                    "#dcfce7"
+
+                                 else
+                                    "#fef3c7"
+                                )
+                            , Attr.style "color"
+                                (if match.isHome then
+                                    "#166534"
+
+                                 else
+                                    "#92400e"
+                                )
+                            , Attr.style "padding" "0.25rem 0.5rem"
+                            , Attr.style "border-radius" "0.375rem"
+                            , Attr.style "font-size" "0.75rem"
+                            , Attr.style "font-weight" "500"
+                            ]
+                            [ Html.text
+                                (if match.isHome then
+                                    "Heim"
+
+                                 else
+                                    "Auswärts"
+                                )
+                            ]
+                        , case model.activeMemberId of
+                            Just activeMemberId ->
+                                viewAvailabilityControls activeMemberId match.id (getMemberAvailabilityForMatch activeMemberId match.id model.availability)
+
+                            Nothing ->
+                                Html.text ""
+                        ]
                     ]
+                , Html.div
+                    [ Attr.style "margin-top" "0.5rem" ]
+                    [ viewAvailabilityOverview match.id model.members model.availability ]
                 ]
             ]
+        , if isExpanded then
+            viewMatchDetailsExpanded match.id model.members model.availability
+
+          else
+            Html.text ""
         ]
 
 
@@ -844,10 +1139,11 @@ viewCreateMatchModal model team =
         ]
         [ Html.div
             [ Attr.style "background-color" "white"
-            , Attr.style "border-radius" "0.5rem"
+            , Attr.style "border-radius" "0.75rem"
             , Attr.style "box-shadow" "0 10px 25px rgba(0,0,0,0.25)"
             , Attr.style "max-width" "500px"
-            , Attr.style "width" "90%"
+            , Attr.style "width" "95%"
+            , Attr.style "margin" "1rem"
             , Attr.style "max-height" "90vh"
             , Attr.style "overflow-y" "auto"
             , Events.stopPropagationOn "click" (Json.Decode.succeed ( NoOpFrontendMsg, True ))
@@ -1005,13 +1301,14 @@ viewCreateMatchModal model team =
                     [ Attr.type_ "submit"
                     , Attr.style "background-color" "#3b82f6"
                     , Attr.style "color" "white"
-                    , Attr.style "padding" "0.75rem 1.5rem"
+                    , Attr.style "padding" "0.875rem 1.5rem"
                     , Attr.style "border" "none"
-                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "border-radius" "0.5rem"
                     , Attr.style "font-size" "1rem"
                     , Attr.style "font-weight" "500"
                     , Attr.style "cursor" "pointer"
                     , Attr.style "transition" "background-color 0.2s"
+                    , Attr.style "min-height" "48px"
                     ]
                     [ Html.text "Spiel hinzufügen" ]
                 ]
@@ -1022,31 +1319,37 @@ viewCreateMatchModal model team =
 viewMembersSection : Model -> Team -> Html FrontendMsg
 viewMembersSection model team =
     Html.div
-        [ Attr.style "margin-top" "3rem" ]
+        [ Attr.style "margin-top" "2rem" ]
         [ Html.div
             [ Attr.style "display" "flex"
             , Attr.style "justify-content" "space-between"
-            , Attr.style "align-items" "center"
-            , Attr.style "margin-bottom" "1.5rem"
+            , Attr.style "align-items" "flex-start"
+            , Attr.style "margin-bottom" "1rem"
+            , Attr.style "gap" "1rem"
+            , Attr.style "flex-wrap" "wrap"
             ]
             [ Html.h3
-                [ Attr.style "font-size" "1.5rem"
+                [ Attr.style "font-size" "1.25rem"
                 , Attr.style "font-weight" "600"
                 , Attr.style "color" "#1e293b"
                 , Attr.style "margin" "0"
+                , Attr.style "flex" "1"
+                , Attr.style "min-width" "0"
                 ]
                 [ Html.text "Mannschaftsmitglieder" ]
             , Html.button
                 [ Events.onClick ShowCreateMemberModal
                 , Attr.style "background-color" "#10b981"
                 , Attr.style "color" "white"
-                , Attr.style "padding" "0.5rem 1rem"
+                , Attr.style "padding" "0.75rem 1rem"
                 , Attr.style "border" "none"
-                , Attr.style "border-radius" "0.375rem"
+                , Attr.style "border-radius" "0.5rem"
                 , Attr.style "font-size" "0.875rem"
                 , Attr.style "font-weight" "500"
                 , Attr.style "cursor" "pointer"
                 , Attr.style "transition" "background-color 0.2s"
+                , Attr.style "min-height" "44px"
+                , Attr.style "flex-shrink" "0"
                 ]
                 [ Html.text "+ Mitglied hinzufügen" ]
             ]
@@ -1066,8 +1369,8 @@ viewMembersSection model team =
           else
             Html.div
                 [ Attr.style "display" "grid"
-                , Attr.style "grid-template-columns" "repeat(auto-fill, minmax(300px, 1fr))"
-                , Attr.style "gap" "1rem"
+                , Attr.style "grid-template-columns" "repeat(auto-fill, minmax(250px, 1fr))"
+                , Attr.style "gap" "0.75rem"
                 ]
                 (List.map viewMemberCard model.members)
         ]
@@ -1079,7 +1382,7 @@ viewMemberCard member =
         [ Attr.style "background-color" "white"
         , Attr.style "border-radius" "0.5rem"
         , Attr.style "box-shadow" "0 1px 3px rgba(0,0,0,0.1)"
-        , Attr.style "padding" "1.5rem"
+        , Attr.style "padding" "1rem"
         ]
         [ Html.div
             [ Attr.style "display" "flex"
@@ -1200,13 +1503,14 @@ viewCreateMemberModal model team =
                     , Attr.style "width" "100%"
                     , Attr.style "background-color" "#10b981"
                     , Attr.style "color" "white"
-                    , Attr.style "padding" "0.75rem 1.5rem"
+                    , Attr.style "padding" "0.875rem 1.5rem"
                     , Attr.style "border" "none"
-                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "border-radius" "0.5rem"
                     , Attr.style "font-size" "1rem"
                     , Attr.style "font-weight" "500"
                     , Attr.style "cursor" "pointer"
                     , Attr.style "transition" "background-color 0.2s"
+                    , Attr.style "min-height" "48px"
                     ]
                     [ Html.text "Mitglied hinzufügen" ]
                 ]
@@ -1311,4 +1615,268 @@ viewMemberSelectionItem member =
                 ]
                 [ Html.text member.name ]
             ]
+        ]
+
+
+viewAvailabilityControls : String -> String -> Maybe Availability -> Html FrontendMsg
+viewAvailabilityControls memberId matchId currentAvailability =
+    Html.div
+        [ Attr.style "display" "flex"
+        , Attr.style "gap" "0.5rem"
+        , Attr.style "margin-top" "0.5rem"
+        , Attr.style "justify-content" "flex-end"
+        ]
+        [ viewAvailabilityButton memberId matchId Available "✓" (currentAvailability == Just Available)
+        , viewAvailabilityButton memberId matchId Maybe "?" (currentAvailability == Just Maybe)
+        , viewAvailabilityButton memberId matchId NotAvailable "✗" (currentAvailability == Just NotAvailable)
+        ]
+
+
+viewAvailabilityButton : String -> String -> Availability -> String -> Bool -> Html FrontendMsg
+viewAvailabilityButton memberId matchId availability icon isSelected =
+    Html.button
+        [ Events.onClick (SetAvailability memberId matchId availability)
+        , Attr.style "background-color"
+            (if isSelected then
+                availabilityToColor availability
+
+             else
+                "#f8fafc"
+            )
+        , Attr.style "color"
+            (if isSelected then
+                "white"
+
+             else
+                "#64748b"
+            )
+        , Attr.style "border"
+            (if isSelected then
+                "1px solid " ++ availabilityToColor availability
+
+             else
+                "1px solid #e2e8f0"
+            )
+        , Attr.style "border-radius" "0.5rem"
+        , Attr.style "width" "44px"
+        , Attr.style "height" "44px"
+        , Attr.style "min-width" "44px"
+        , Attr.style "min-height" "44px"
+        , Attr.style "display" "flex"
+        , Attr.style "align-items" "center"
+        , Attr.style "justify-content" "center"
+        , Attr.style "cursor" "pointer"
+        , Attr.style "font-size" "0.875rem"
+        , Attr.style "font-weight" "600"
+        , Attr.style "transition" "all 0.2s"
+        , Attr.title (availabilityToString availability)
+        ]
+        [ Html.text icon ]
+
+
+viewAvailabilityOverview : String -> List Member -> List AvailabilityRecord -> Html FrontendMsg
+viewAvailabilityOverview matchId members availability =
+    let
+        summary =
+            getMatchAvailabilitySummary matchId members availability
+
+        noResponses =
+            summary.total - summary.available - summary.notAvailable - summary.maybe
+    in
+    if summary.total == 0 then
+        Html.text ""
+
+    else
+        Html.div
+            [ Attr.style "display" "flex"
+            , Attr.style "align-items" "center"
+            , Attr.style "gap" "0.5rem"
+            , Attr.style "margin-top" "0.5rem"
+            ]
+            [ Html.span
+                [ Attr.style "font-size" "0.75rem"
+                , Attr.style "color" "#6b7280"
+                , Attr.style "font-weight" "500"
+                ]
+                [ Html.text "Verfügbarkeit:" ]
+            , Html.div
+                [ Attr.style "display" "flex"
+                , Attr.style "gap" "0.25rem"
+                , Attr.style "align-items" "center"
+                ]
+                [ if summary.available > 0 then
+                    viewAvailabilitySummaryBadge "✓" (String.fromInt summary.available) "#10b981"
+
+                  else
+                    Html.text ""
+                , if summary.maybe > 0 then
+                    viewAvailabilitySummaryBadge "?" (String.fromInt summary.maybe) "#f59e0b"
+
+                  else
+                    Html.text ""
+                , if summary.notAvailable > 0 then
+                    viewAvailabilitySummaryBadge "✗" (String.fromInt summary.notAvailable) "#ef4444"
+
+                  else
+                    Html.text ""
+                , if noResponses > 0 then
+                    viewAvailabilitySummaryBadge "−" (String.fromInt noResponses) "#9ca3af"
+
+                  else
+                    Html.text ""
+                ]
+            ]
+
+
+viewAvailabilitySummaryBadge : String -> String -> String -> Html FrontendMsg
+viewAvailabilitySummaryBadge icon count color =
+    Html.span
+        [ Attr.style "display" "inline-flex"
+        , Attr.style "align-items" "center"
+        , Attr.style "gap" "0.25rem"
+        , Attr.style "background-color" color
+        , Attr.style "color" "white"
+        , Attr.style "padding" "0.125rem 0.375rem"
+        , Attr.style "border-radius" "0.375rem"
+        , Attr.style "font-size" "0.75rem"
+        , Attr.style "font-weight" "600"
+        ]
+        [ Html.span [] [ Html.text icon ]
+        , Html.span [] [ Html.text count ]
+        ]
+
+
+viewMatchDetailsExpanded : String -> List Member -> List AvailabilityRecord -> Html FrontendMsg
+viewMatchDetailsExpanded matchId members availability =
+    let
+        groupedMembers =
+            members
+                |> List.map
+                    (\member ->
+                        let
+                            memberAvailability =
+                                availability
+                                    |> List.filter (\record -> record.memberId == member.id && record.matchId == matchId)
+                                    |> List.head
+                                    |> Maybe.map .availability
+                        in
+                        ( member, memberAvailability )
+                    )
+                |> List.foldl
+                    (\( member, maybeAvailability ) acc ->
+                        case maybeAvailability of
+                            Just Available ->
+                                { acc | available = member :: acc.available }
+
+                            Just NotAvailable ->
+                                { acc | notAvailable = member :: acc.notAvailable }
+
+                            Just Maybe ->
+                                { acc | maybe = member :: acc.maybe }
+
+                            Nothing ->
+                                { acc | noResponse = member :: acc.noResponse }
+                    )
+                    { available = [], notAvailable = [], maybe = [], noResponse = [] }
+    in
+    Html.div
+        [ Attr.style "background-color" "#f8fafc"
+        , Attr.style "padding" "1rem 1.5rem"
+        , Attr.style "border-top" "1px solid #e2e8f0"
+        ]
+        [ Html.h5
+            [ Attr.style "font-size" "0.875rem"
+            , Attr.style "font-weight" "600"
+            , Attr.style "color" "#374151"
+            , Attr.style "margin" "0 0 1rem 0"
+            ]
+            [ Html.text "Verfügbarkeit der Mitglieder" ]
+        , Html.div
+            [ Attr.style "display" "grid"
+            , Attr.style "grid-template-columns" "repeat(auto-fit, minmax(200px, 1fr))"
+            , Attr.style "gap" "1rem"
+            ]
+            [ viewAvailabilityGroup "Verfügbar" "#10b981" "✓" groupedMembers.available
+            , viewAvailabilityGroup "Vielleicht" "#f59e0b" "?" groupedMembers.maybe
+            , viewAvailabilityGroup "Nicht verfügbar" "#ef4444" "✗" groupedMembers.notAvailable
+            , viewAvailabilityGroup "Keine Antwort" "#9ca3af" "−" groupedMembers.noResponse
+            ]
+        ]
+
+
+viewAvailabilityGroup : String -> String -> String -> List Member -> Html FrontendMsg
+viewAvailabilityGroup title color icon members =
+    Html.div
+        [ Attr.style "background-color" "white"
+        , Attr.style "border-radius" "0.375rem"
+        , Attr.style "padding" "0.75rem"
+        , Attr.style "border" ("1px solid " ++ color)
+        ]
+        [ Html.div
+            [ Attr.style "display" "flex"
+            , Attr.style "align-items" "center"
+            , Attr.style "gap" "0.5rem"
+            , Attr.style "margin-bottom" "0.5rem"
+            ]
+            [ Html.span
+                [ Attr.style "color" color
+                , Attr.style "font-weight" "600"
+                ]
+                [ Html.text icon ]
+            , Html.h6
+                [ Attr.style "font-size" "0.75rem"
+                , Attr.style "font-weight" "600"
+                , Attr.style "color" color
+                , Attr.style "margin" "0"
+                ]
+                [ Html.text (title ++ " (" ++ String.fromInt (List.length members) ++ ")") ]
+            ]
+        , if List.isEmpty members then
+            Html.p
+                [ Attr.style "color" "#9ca3af"
+                , Attr.style "font-size" "0.75rem"
+                , Attr.style "margin" "0"
+                , Attr.style "font-style" "italic"
+                ]
+                [ Html.text "Keine Mitglieder" ]
+
+          else
+            Html.div
+                [ Attr.style "display" "flex"
+                , Attr.style "flex-direction" "column"
+                , Attr.style "gap" "0.25rem"
+                ]
+                (List.map viewMemberInGroup members)
+        ]
+
+
+viewMemberInGroup : Member -> Html FrontendMsg
+viewMemberInGroup member =
+    Html.div
+        [ Attr.style "display" "flex"
+        , Attr.style "align-items" "center"
+        , Attr.style "gap" "0.5rem"
+        ]
+        [ Html.div
+            [ Attr.style "width" "1.5rem"
+            , Attr.style "height" "1.5rem"
+            , Attr.style "border-radius" "50%"
+            , Attr.style "background-color" "#e5e7eb"
+            , Attr.style "display" "flex"
+            , Attr.style "align-items" "center"
+            , Attr.style "justify-content" "center"
+            , Attr.style "flex-shrink" "0"
+            ]
+            [ Html.span
+                [ Attr.style "font-weight" "600"
+                , Attr.style "color" "#374151"
+                , Attr.style "font-size" "0.625rem"
+                ]
+                [ Html.text (String.left 1 member.name |> String.toUpper) ]
+            ]
+        , Html.span
+            [ Attr.style "font-size" "0.75rem"
+            , Attr.style "color" "#374151"
+            ]
+            [ Html.text member.name ]
         ]

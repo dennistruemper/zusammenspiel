@@ -3,6 +3,7 @@ module Types exposing (..)
 import Browser exposing (UrlRequest)
 import Browser.Navigation exposing (Key)
 import Dict exposing (Dict)
+import Lamdera exposing (SessionId)
 import Random
 import Url exposing (Url)
 
@@ -19,6 +20,7 @@ type alias Team =
     { id : TeamId
     , name : String
     , slug : String
+    , playersNeeded : Int
     , createdAt : Int
     }
 
@@ -101,6 +103,8 @@ type alias FrontendModel =
     , showCreateMatchModal : Bool
     , showCreateMemberModal : Bool
     , showMemberSelectionModal : Bool
+    , expandedMatches : List String -- Match IDs that are expanded
+    , hostname : Maybe String -- Current hostname from JavaScript
     }
 
 
@@ -115,6 +119,7 @@ type alias CreateTeamForm =
     { name : String
     , creatorName : String
     , otherMemberNames : String
+    , playersNeeded : String
     }
 
 
@@ -140,6 +145,7 @@ type alias BackendModel =
     { teams : Dict TeamId TeamData -- teamId -> TeamData
     , nextId : Int
     , randomSeed : Random.Seed
+    , teamSessions : Dict TeamId (List SessionId) -- Track which sessions are viewing each team
     }
 
 
@@ -165,14 +171,17 @@ type FrontendMsg
     | SelectActiveMember String
     | LocalStorageMessage String
     | LogoutRequested
+    | SetAvailability String String Availability
+    | ToggleMatchDetails String
     | NoOpFrontendMsg
 
 
 type ToBackend
-    = CreateTeamRequest String String (List String)
+    = CreateTeamRequest String String (List String) Int
     | GetTeamRequest TeamId
     | CreateMatchRequest TeamId CreateMatchForm
     | CreateMemberRequest TeamId CreateMemberForm
+    | UpdateAvailabilityRequest String String Availability
     | NoOpToBackend
 
 
@@ -186,4 +195,5 @@ type ToFrontend
     | TeamNotFound
     | MatchCreated Match
     | MemberCreated Member
+    | AvailabilityUpdated AvailabilityRecord
     | NoOpToFrontend

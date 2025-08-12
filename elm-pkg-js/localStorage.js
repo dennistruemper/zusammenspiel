@@ -24,6 +24,10 @@ exports.init = async function (app) {
       } else {
         app.ports.fromJS.send("LOAD:null");
       }
+    } else if (message === "GET_HOSTNAME") {
+      // Get current hostname with protocol
+      const currentUrl = window.location.protocol + "//" + window.location.host;
+      app.ports.fromJS.send("HOSTNAME:" + currentUrl);
     }
   });
 };

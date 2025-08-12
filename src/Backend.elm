@@ -26,9 +26,26 @@ init =
     ( { teams = Dict.empty
       , nextId = 1
       , randomSeed = Random.initialSeed 42 -- Will be updated with real time
+      , teamSessions = Dict.empty
       }
     , Cmd.none
     )
+
+
+
+-- HELPER FUNCTIONS
+
+
+sendToTeamSessions : TeamId -> ToFrontend -> Model -> Cmd BackendMsg
+sendToTeamSessions teamId message model =
+    case Dict.get teamId model.teamSessions of
+        Just sessions ->
+            sessions
+                |> List.map (\sessionId -> sendToFrontend sessionId message)
+                |> Cmd.batch
+
+        Nothing ->
+            Cmd.none
 
 
 update : BackendMsg -> Model -> ( Model, Cmd BackendMsg )
@@ -41,7 +58,7 @@ update msg model =
 updateFromFrontend : SessionId -> ClientId -> ToBackend -> Model -> ( Model, Cmd BackendMsg )
 updateFromFrontend sessionId clientId msg model =
     case msg of
-        CreateTeamRequest name creatorName otherMemberNames ->
+        CreateTeamRequest name creatorName otherMemberNames playersNeeded ->
             let
                 timestamp =
                     Time.posixToMillis (Time.millisToPosix model.nextId)
@@ -56,6 +73,7 @@ updateFromFrontend sessionId clientId msg model =
                     { id = teamId
                     , name = name
                     , slug = slug
+                    , playersNeeded = playersNeeded
                     , createdAt = timestamp
                     }
 
@@ -114,6 +132,21 @@ updateFromFrontend sessionId clientId msg model =
             case Dict.get teamId model.teams of
                 Just teamData ->
                     let
+                        -- Track this session as viewing this team
+                        currentTeamSessions =
+                            Dict.get teamId model.teamSessions
+                                |> Maybe.withDefault []
+
+                        updatedTeamSessions =
+                            if List.member sessionId currentTeamSessions then
+                                currentTeamSessions
+
+                            else
+                                sessionId :: currentTeamSessions
+
+                        updatedModel =
+                            { model | teamSessions = Dict.insert teamId updatedTeamSessions model.teamSessions }
+
                         -- Convert all matches from all seasons to a flat list for frontend compatibility
                         teamMatches =
                             teamData.seasons
@@ -141,7 +174,7 @@ updateFromFrontend sessionId clientId msg model =
                                                 )
                                     )
                     in
-                    ( model
+                    ( updatedModel
                     , sendToFrontend clientId (TeamLoaded teamData.team teamMatches teamMembers teamAvailability)
                     )
 
@@ -219,7 +252,7 @@ updateFromFrontend sessionId clientId msg model =
                             }
                     in
                     ( updatedModel
-                    , sendToFrontend clientId (MatchCreated newMatch)
+                    , sendToTeamSessions teamId (MatchCreated newMatch) updatedModel
                     )
 
                 Nothing ->
@@ -250,13 +283,65 @@ updateFromFrontend sessionId clientId msg model =
                             }
                     in
                     ( updatedModel
-                    , sendToFrontend clientId (MemberCreated newMember)
+                    , sendToTeamSessions teamId (MemberCreated newMember) updatedModel
                     )
 
                 Nothing ->
                     ( model
                     , sendToFrontend clientId TeamNotFound
                     )
+
+        UpdateAvailabilityRequest memberId matchId availability ->
+            -- Find the team that contains this match
+            let
+                findTeamWithMatch : ( TeamId, TeamData ) -> Bool
+                findTeamWithMatch ( _, teamData ) =
+                    teamData.seasons
+                        |> Dict.values
+                        |> List.concatMap (\seasonData -> seasonData.hinrunde ++ seasonData.rückrunde)
+                        |> List.any (\match -> match.id == matchId)
+
+                maybeTeamData =
+                    model.teams
+                        |> Dict.toList
+                        |> List.filter findTeamWithMatch
+                        |> List.head
+            in
+            case maybeTeamData of
+                Just ( teamId, teamData ) ->
+                    let
+                        -- Get current member's availability dict or create empty one
+                        memberAvailability =
+                            Dict.get memberId teamData.availability
+                                |> Maybe.withDefault Dict.empty
+
+                        -- Update the specific match availability
+                        updatedMemberAvailability =
+                            Dict.insert matchId availability memberAvailability
+
+                        -- Update the overall availability structure
+                        updatedAvailability =
+                            Dict.insert memberId updatedMemberAvailability teamData.availability
+
+                        updatedTeamData =
+                            { teamData | availability = updatedAvailability }
+
+                        updatedModel =
+                            { model | teams = Dict.insert teamId updatedTeamData model.teams }
+
+                        -- Create response record for frontend
+                        newAvailabilityRecord =
+                            { memberId = memberId
+                            , matchId = matchId
+                            , availability = availability
+                            }
+                    in
+                    ( updatedModel
+                    , sendToTeamSessions teamId (AvailabilityUpdated newAvailabilityRecord) updatedModel
+                    )
+
+                Nothing ->
+                    ( model, Cmd.none )
 
         NoOpToBackend ->
             ( model, Cmd.none )
