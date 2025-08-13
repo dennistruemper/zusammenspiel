@@ -1,5 +1,6 @@
 module Frontend exposing (..)
 
+import Basics exposing (min)
 import Browser exposing (UrlRequest(..))
 import Browser.Navigation as Nav
 import Html exposing (Html)
@@ -11,7 +12,7 @@ import LocalStorage
 import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
-import Utils exposing (createTeamUrl, extractTeamIdFromUrl)
+import Utils exposing (createTeamUrl, extractTeamIdFromUrl, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByDate)
 
 
 type alias Model =
@@ -47,7 +48,13 @@ init url key =
             , showCreateMatchModal = False
             , showCreateMemberModal = False
             , showMemberSelectionModal = False
+            , showCreateMemberInModal = False
+            , showChangeMatchDateModal = False
+            , changeMatchDateForm = ""
+            , changeMatchDateMatchId = Nothing
             , expandedMatches = []
+            , pastMatchesShown = 10
+            , pastMatchesExpanded = False
             , matches = []
             , members = []
             , availability = []
@@ -177,7 +184,9 @@ update msg model =
                 ( model, Cmd.none )
 
             else
-                ( { model | showCreateMemberModal = False, createMemberForm = { name = "" } }
+                ( { model
+                    | createMemberForm = { name = "" }
+                  }
                 , Lamdera.sendToBackend (CreateMemberRequest teamId model.createMemberForm)
                 )
 
@@ -192,6 +201,12 @@ update msg model =
 
         HideMemberSelectionModal ->
             ( { model | showMemberSelectionModal = False }, Cmd.none )
+
+        ShowCreateMemberInModal ->
+            ( { model | showCreateMemberInModal = True }, Cmd.none )
+
+        HideCreateMemberInModal ->
+            ( { model | showCreateMemberInModal = False }, Cmd.none )
 
         SelectActiveMember memberId ->
             ( { model | activeMemberId = Just memberId, showMemberSelectionModal = False }
@@ -256,6 +271,49 @@ update msg model =
             in
             ( { model | expandedMatches = updatedExpandedMatches }, Cmd.none )
 
+        LoadMorePastMatches ->
+            ( { model | pastMatchesShown = model.pastMatchesShown + 10 }, Cmd.none )
+
+        TogglePastMatchesSection ->
+            ( { model | pastMatchesExpanded = not model.pastMatchesExpanded }, Cmd.none )
+
+        ShowChangeMatchDateModal matchId ->
+            let
+                currentMatch =
+                    model.matches
+                        |> List.filter (\match -> match.id == matchId)
+                        |> List.head
+            in
+            ( { model
+                | showChangeMatchDateModal = True
+                , changeMatchDateMatchId = Just matchId
+                , changeMatchDateForm = Maybe.map .date currentMatch |> Maybe.withDefault ""
+              }
+            , Cmd.none
+            )
+
+        HideChangeMatchDateModal ->
+            ( { model
+                | showChangeMatchDateModal = False
+                , changeMatchDateMatchId = Nothing
+                , changeMatchDateForm = ""
+              }
+            , Cmd.none
+            )
+
+        ChangeMatchDateFormUpdated matchId newDate ->
+            ( { model | changeMatchDateForm = newDate }, Cmd.none )
+
+        ChangeMatchDateSubmitted matchId newDate ->
+            case model.currentTeam of
+                Just team ->
+                    ( model
+                    , Lamdera.sendToBackend (ChangeMatchDateRequest matchId newDate team.id)
+                    )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
         NoOpFrontendMsg ->
             ( model, Cmd.none )
 
@@ -303,7 +361,29 @@ updateFromBackend msg model =
             ( { model | matches = match :: model.matches }, Cmd.none )
 
         MemberCreated member ->
-            ( { model | members = member :: model.members }, Cmd.none )
+            let
+                -- If we were in the member selection modal and just created a member,
+                -- automatically set them as the active member
+                shouldSetAsActive =
+                    model.showMemberSelectionModal || model.showCreateMemberInModal
+            in
+            ( { model
+                | members = member :: model.members
+                , activeMemberId =
+                    if shouldSetAsActive then
+                        Just member.id
+
+                    else
+                        model.activeMemberId
+                , showMemberSelectionModal = False
+                , showCreateMemberInModal = False
+              }
+            , if shouldSetAsActive then
+                LocalStorage.toJS ("SET:" ++ member.id)
+
+              else
+                Cmd.none
+            )
 
         AvailabilityUpdated availabilityRecord ->
             let
@@ -314,6 +394,34 @@ updateFromBackend msg model =
                         |> (::) availabilityRecord
             in
             ( { model | availability = updatedAvailability }, Cmd.none )
+
+        MatchDateChanged matchId newDate ->
+            let
+                -- Update the match date in the matches list
+                updatedMatches =
+                    List.map
+                        (\match ->
+                            if match.id == matchId then
+                                { match | date = newDate }
+
+                            else
+                                match
+                        )
+                        model.matches
+
+                -- Remove all availability records for this match
+                updatedAvailability =
+                    List.filter (\record -> record.matchId /= matchId) model.availability
+            in
+            ( { model
+                | matches = updatedMatches
+                , availability = updatedAvailability
+                , showChangeMatchDateModal = False
+                , changeMatchDateMatchId = Nothing
+                , changeMatchDateForm = ""
+              }
+            , Cmd.none
+            )
 
         NoOpToFrontend ->
             ( model, Cmd.none )
@@ -364,10 +472,12 @@ viewPage model =
         [ -- Mobile viewport meta tag would go in document head, but we'll handle responsive design with CSS
           viewHeader model
         , Html.main_
-            [ Attr.style "max-width" "1200px"
-            , Attr.style "margin" "0 auto"
-            , Attr.style "padding" "1rem"
-            , Attr.style "@media (min-width: 768px)" "padding: 2rem"
+            [ Attr.style "max-width" "100vw"
+            , Attr.style "margin" "0"
+            , Attr.style "padding" "0.5rem"
+            , Attr.style "width" "100vw"
+            , Attr.style "box-sizing" "border-box"
+            , Attr.style "overflow-x" "hidden"
             ]
             [ viewContent model ]
         ]
@@ -379,15 +489,18 @@ viewHeader model =
         [ Attr.style "background-color" "white"
         , Attr.style "border-bottom" "1px solid #e2e8f0"
         , Attr.style "padding" "0.75rem 1rem"
+        , Attr.style "width" "100vw"
+        , Attr.style "box-sizing" "border-box"
         ]
         [ Html.div
-            [ Attr.style "max-width" "1200px"
-            , Attr.style "margin" "0 auto"
+            [ Attr.style "max-width" "100vw"
+            , Attr.style "margin" "0"
             , Attr.style "display" "flex"
             , Attr.style "justify-content" "space-between"
             , Attr.style "align-items" "center"
             , Attr.style "flex-wrap" "wrap"
             , Attr.style "gap" "0.5rem"
+            , Attr.style "width" "100%"
             ]
             [ Html.h1
                 [ Attr.style "font-size" "1.25rem"
@@ -667,6 +780,7 @@ viewTeamPage model =
                     , Attr.style "font-weight" "600"
                     , Attr.style "color" "#1e293b"
                     , Attr.style "margin-bottom" "2rem"
+                    , Attr.style "width" "100%"
                     ]
                     [ Html.text team.name ]
                 , if List.isEmpty model.matches then
@@ -710,7 +824,6 @@ viewTeamPage model =
                   else
                     Html.text ""
                 , viewMatchesSection model team
-                , viewMembersSection model team
                 , if model.showCreateMatchModal then
                     viewCreateMatchModal model team
 
@@ -723,6 +836,11 @@ viewTeamPage model =
                     Html.text ""
                 , if model.showMemberSelectionModal then
                     viewMemberSelectionModal model team
+
+                  else
+                    Html.text ""
+                , if model.showChangeMatchDateModal then
+                    viewChangeMatchDateModal model
 
                   else
                     Html.text ""
@@ -847,22 +965,60 @@ type MatchStatus
     = Ready -- Available >= playersNeeded (Green)
     | Possible -- Available + Maybe >= playersNeeded (Yellow)
     | NotReady -- Available + Maybe < playersNeeded (Red)
+    | Past -- Past matches (No color)
 
 
-getMatchStatus : String -> List Member -> List AvailabilityRecord -> Int -> MatchStatus
-getMatchStatus matchId members availability playersNeeded =
+getMatchStatus : String -> String -> List Member -> List AvailabilityRecord -> Int -> MatchStatus
+getMatchStatus matchId matchDate members availability playersNeeded =
     let
         summary =
             getMatchAvailabilitySummary matchId members availability
+
+        today =
+            "13.08.2025"
+
+        -- Current date for testing (German format)
+        -- Convert German date format (dd.mm.yyyy) to sortable format (yyyy-mm-dd)
+        convertToSortable : String -> String
+        convertToSortable dateStr =
+            case String.split "." dateStr of
+                [ day, month, year ] ->
+                    year ++ "-" ++ String.padLeft 2 '0' month ++ "-" ++ String.padLeft 2 '0' day
+
+                _ ->
+                    dateStr
+
+        -- Check if match is in the past
+        isPastMatch =
+            convertToSortable matchDate < convertToSortable today
+
+        -- Check if match is less than 2 weeks in the future
+        isLessThanTwoWeeksAway =
+            let
+                twoWeeksFromNow =
+                    "27.08.2025"
+
+                -- 2 weeks from today (German format)
+            in
+            convertToSortable matchDate >= convertToSortable today && convertToSortable matchDate <= convertToSortable twoWeeksFromNow
     in
-    if summary.available >= playersNeeded then
+    if isPastMatch then
+        -- Past matches don't need status colors
+        Past
+
+    else if summary.available >= playersNeeded then
         Ready
 
     else if summary.available + summary.maybe >= playersNeeded then
         Possible
 
-    else
+    else if isLessThanTwoWeeksAway then
+        -- Only show NotReady for matches less than 2 weeks away
         NotReady
+
+    else
+        -- For matches more than 2 weeks away, show as Possible even if not enough votes
+        Possible
 
 
 matchStatusToColor : MatchStatus -> String
@@ -879,9 +1035,13 @@ matchStatusToColor status =
         NotReady ->
             "#ef4444"
 
+        -- Red
+        Past ->
+            "#6b7280"
 
 
--- Red
+
+-- Gray (neutral)
 
 
 matchStatusToBackgroundColor : MatchStatus -> String
@@ -898,9 +1058,13 @@ matchStatusToBackgroundColor status =
         NotReady ->
             "#fee2e2"
 
+        -- Light red
+        Past ->
+            "#f9fafb"
 
 
--- Light red
+
+-- Light gray (neutral)
 
 
 getMatchAvailabilitySummary : String -> List Member -> List AvailabilityRecord -> AvailabilitySummary
@@ -941,8 +1105,28 @@ getMatchAvailabilitySummary matchId members availability =
 
 viewMatchesSection : Model -> Team -> Html FrontendMsg
 viewMatchesSection model team =
+    let
+        ( pastMatches, futureMatches ) =
+            separatePastAndFutureMatches model.matches
+
+        -- Sort past matches by oldest first (chronological order)
+        sortedPastMatches =
+            List.sortWith (\a b -> compare a.date b.date) pastMatches
+
+        -- Sort future matches by earliest first (next match at top)
+        sortedFutureMatches =
+            List.sortWith (\a b -> compare a.date b.date) futureMatches
+
+        pastMatchesToShow =
+            List.take model.pastMatchesShown sortedPastMatches
+
+        hasMorePastMatches =
+            List.length sortedPastMatches > model.pastMatchesShown
+    in
     Html.div
-        [ Attr.style "margin-top" "2rem" ]
+        [ Attr.style "margin-top" "2rem"
+        , Attr.style "width" "100%"
+        ]
         [ Html.div
             [ Attr.style "display" "flex"
             , Attr.style "justify-content" "space-between"
@@ -990,24 +1174,115 @@ viewMatchesSection model team =
                 ]
 
           else
-            Html.div
-                [ Attr.style "background-color" "white"
-                , Attr.style "border-radius" "0.5rem"
-                , Attr.style "box-shadow" "0 1px 3px rgba(0,0,0,0.1)"
-                , Attr.style "overflow" "hidden"
+            Html.div []
+                [ -- Past Matches Section
+                  if List.isEmpty pastMatches then
+                    Html.text ""
+
+                  else
+                    Html.div
+                        [ Attr.style "margin-bottom" "2rem" ]
+                        [ Html.div
+                            [ Attr.style "display" "flex"
+                            , Attr.style "align-items" "center"
+                            , Attr.style "gap" "0.5rem"
+                            , Attr.style "margin-bottom" "1rem"
+                            , Attr.style "cursor" "pointer"
+                            , Events.onClick TogglePastMatchesSection
+                            ]
+                            [ Html.h4
+                                [ Attr.style "font-size" "1rem"
+                                , Attr.style "font-weight" "600"
+                                , Attr.style "color" "#6b7280"
+                                , Attr.style "margin" "0"
+                                ]
+                                [ Html.text ("Vergangene Spiele (" ++ String.fromInt (List.length sortedPastMatches) ++ ")") ]
+                            , Html.span
+                                [ Attr.style "font-size" "0.875rem"
+                                , Attr.style "color" "#9ca3af"
+                                ]
+                                [ Html.text
+                                    (if model.pastMatchesExpanded then
+                                        "▼"
+
+                                     else
+                                        "▶"
+                                    )
+                                ]
+                            ]
+                        , if model.pastMatchesExpanded then
+                            Html.div []
+                                [ Html.div
+                                    [ Attr.style "width" "100%"
+                                    ]
+                                    (List.indexedMap
+                                        (\index match ->
+                                            viewMatchItem model team match (index == List.length pastMatchesToShow - 1)
+                                        )
+                                        pastMatchesToShow
+                                    )
+                                , if hasMorePastMatches then
+                                    Html.div
+                                        [ Attr.style "text-align" "center"
+                                        , Attr.style "margin-top" "1rem"
+                                        ]
+                                        [ Html.button
+                                            [ Events.onClick LoadMorePastMatches
+                                            , Attr.style "background-color" "#f3f4f6"
+                                            , Attr.style "color" "#374151"
+                                            , Attr.style "padding" "0.5rem 1rem"
+                                            , Attr.style "border" "1px solid #d1d5db"
+                                            , Attr.style "border-radius" "0.375rem"
+                                            , Attr.style "font-size" "0.875rem"
+                                            , Attr.style "font-weight" "500"
+                                            , Attr.style "cursor" "pointer"
+                                            , Attr.style "transition" "background-color 0.2s"
+                                            ]
+                                            [ Html.text ("Weitere " ++ String.fromInt (min 10 (List.length sortedPastMatches - model.pastMatchesShown)) ++ " Spiele laden") ]
+                                        ]
+
+                                  else
+                                    Html.text ""
+                                ]
+
+                          else
+                            Html.text ""
+                        ]
+                , -- Future Matches Section
+                  if List.isEmpty futureMatches then
+                    Html.text ""
+
+                  else
+                    Html.div []
+                        [ Html.h4
+                            [ Attr.style "font-size" "1rem"
+                            , Attr.style "font-weight" "600"
+                            , Attr.style "color" "#6b7280"
+                            , Attr.style "margin" "0 0 1rem 0"
+                            ]
+                            [ Html.text "Kommende Spiele" ]
+                        , Html.div
+                            [ Attr.style "width" "100%"
+                            ]
+                            (List.indexedMap
+                                (\index match ->
+                                    viewMatchItem model team match (index == List.length sortedFutureMatches - 1)
+                                )
+                                sortedFutureMatches
+                            )
+                        ]
                 ]
-                (List.map (viewMatchItem model team) model.matches)
         ]
 
 
-viewMatchItem : Model -> Team -> Match -> Html FrontendMsg
-viewMatchItem model team match =
+viewMatchItem : Model -> Team -> Match -> Bool -> Html FrontendMsg
+viewMatchItem model team match isLast =
     let
         isExpanded =
             List.member match.id model.expandedMatches
 
         matchStatus =
-            getMatchStatus match.id model.members model.availability team.playersNeeded
+            getMatchStatus match.id match.date model.members model.availability team.playersNeeded
 
         statusBackgroundColor =
             matchStatusToBackgroundColor matchStatus
@@ -1016,14 +1291,20 @@ viewMatchItem model team match =
             matchStatusToColor matchStatus
     in
     Html.div
-        [ Attr.style "border-bottom" "1px solid #e2e8f0"
-        , Attr.style "border-left" ("4px solid " ++ statusBorderColor)
+        [ Attr.style "border-left" ("4px solid " ++ statusBorderColor)
         , Attr.style "background-color" statusBackgroundColor
+        , Attr.style "border-radius" "0.5rem"
+        , Attr.style "margin-bottom"
+            (if isLast then
+                "0"
+
+             else
+                "1rem"
+            )
+        , Attr.style "box-shadow" "0 1px 3px rgba(0,0,0,0.1)"
         ]
         [ Html.div
             [ Attr.style "padding" "1rem 1.5rem"
-            , Attr.style "cursor" "pointer"
-            , Events.onClick (ToggleMatchDetails match.id)
             ]
             [ Html.div
                 [ Attr.style "display" "flex"
@@ -1039,7 +1320,7 @@ viewMatchItem model team match =
                     ]
                     [ Html.div
                         [ Attr.style "flex" "1"
-                        , Attr.style "min-width" "200px"
+                        , Attr.style "min-width" "0"
                         ]
                         [ Html.h4
                             [ Attr.style "font-weight" "600"
@@ -1048,10 +1329,10 @@ viewMatchItem model team match =
                             ]
                             [ Html.text
                                 (if match.isHome then
-                                    "vs " ++ match.opponent
+                                    "🏠 " ++ match.opponent
 
                                  else
-                                    "@ " ++ match.opponent
+                                    "🚗 " ++ match.opponent
                                 )
                             ]
                         , Html.p
@@ -1059,7 +1340,22 @@ viewMatchItem model team match =
                             , Attr.style "margin" "0 0 0.5rem 0"
                             , Attr.style "font-size" "0.875rem"
                             ]
-                            [ Html.text (match.date ++ " um " ++ match.time) ]
+                            [ Html.text (isoToGermanDate match.date ++ " um " ++ match.time) ]
+                        , Html.button
+                            [ Events.onClick (ShowChangeMatchDateModal match.id)
+                            , Attr.style "background-color" "#f3f4f6"
+                            , Attr.style "border" "1px solid #d1d5db"
+                            , Attr.style "border-radius" "0.375rem"
+                            , Attr.style "padding" "0.5rem 0.75rem"
+                            , Attr.style "font-size" "0.75rem"
+                            , Attr.style "color" "#374151"
+                            , Attr.style "cursor" "pointer"
+                            , Attr.style "min-height" "44px"
+                            , Attr.style "white-space" "nowrap"
+                            , Attr.style "transition" "background-color 0.2s"
+                            , Attr.style "margin-bottom" "0.5rem"
+                            ]
+                            [ Html.text "📅 Datum ändern" ]
                         , Html.p
                             [ Attr.style "color" "#64748b"
                             , Attr.style "margin" "0 0 0.5rem 0"
@@ -1110,8 +1406,37 @@ viewMatchItem model team match =
                         ]
                     ]
                 , Html.div
-                    [ Attr.style "margin-top" "0.5rem" ]
-                    [ viewAvailabilityOverview match.id model.members model.availability ]
+                    [ Attr.style "margin-top" "0.5rem"
+                    , Attr.style "display" "flex"
+                    , Attr.style "justify-content" "space-between"
+                    , Attr.style "align-items" "center"
+                    ]
+                    [ viewAvailabilityOverview match.id model.members model.availability
+                    , Html.button
+                        [ Events.onClick (ToggleMatchDetails match.id)
+                        , Attr.style "background-color" "#f8fafc"
+                        , Attr.style "border" "1px solid #e2e8f0"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "padding" "0.5rem"
+                        , Attr.style "font-size" "1rem"
+                        , Attr.style "color" "#64748b"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "min-height" "44px"
+                        , Attr.style "min-width" "44px"
+                        , Attr.style "transition" "background-color 0.2s"
+                        , Attr.style "display" "flex"
+                        , Attr.style "align-items" "center"
+                        , Attr.style "justify-content" "center"
+                        ]
+                        [ Html.text
+                            (if isExpanded then
+                                "👁️"
+
+                             else
+                                "👥"
+                            )
+                        ]
+                    ]
                 ]
             ]
         , if isExpanded then
@@ -1216,9 +1541,10 @@ viewCreateMatchModal model team =
                             ]
                             [ Html.text "Datum" ]
                         , Html.input
-                            [ Attr.type_ "date"
+                            [ Attr.type_ "text"
                             , Attr.value model.createMatchForm.date
                             , Events.onInput (\date -> CreateMatchFormUpdated (updateMatchFormDate date model.createMatchForm))
+                            , Attr.placeholder "25.12.2024"
                             , Attr.style "width" "100%"
                             , Attr.style "padding" "0.75rem"
                             , Attr.style "border" "1px solid #d1d5db"
@@ -1520,6 +1846,84 @@ viewCreateMemberModal model team =
 
 viewMemberSelectionModal : Model -> Team -> Html FrontendMsg
 viewMemberSelectionModal model team =
+    if model.showCreateMemberInModal then
+        viewCreateMemberInModal model team
+
+    else
+        Html.div
+            [ Attr.style "position" "fixed"
+            , Attr.style "top" "0"
+            , Attr.style "left" "0"
+            , Attr.style "width" "100%"
+            , Attr.style "height" "100%"
+            , Attr.style "background-color" "rgba(0,0,0,0.5)"
+            , Attr.style "display" "flex"
+            , Attr.style "justify-content" "center"
+            , Attr.style "align-items" "center"
+            , Attr.style "z-index" "1000"
+            ]
+            [ Html.div
+                [ Attr.style "background-color" "white"
+                , Attr.style "border-radius" "0.5rem"
+                , Attr.style "box-shadow" "0 10px 25px rgba(0,0,0,0.25)"
+                , Attr.style "max-width" "500px"
+                , Attr.style "width" "90%"
+                , Attr.style "max-height" "90vh"
+                , Attr.style "overflow-y" "auto"
+                ]
+                [ Html.div
+                    [ Attr.style "padding" "1.5rem"
+                    , Attr.style "border-bottom" "1px solid #e5e7eb"
+                    ]
+                    [ Html.h3
+                        [ Attr.style "font-size" "1.25rem"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#1e293b"
+                        , Attr.style "margin" "0"
+                        , Attr.style "text-align" "center"
+                        ]
+                        [ Html.text "Wer bist du?" ]
+                    , Html.p
+                        [ Attr.style "color" "#64748b"
+                        , Attr.style "margin-top" "0.5rem"
+                        , Attr.style "margin-bottom" "0"
+                        , Attr.style "text-align" "center"
+                        ]
+                        [ Html.text "Wähle deinen Namen aus der Liste der Mannschaftsmitglieder." ]
+                    ]
+                , Html.div
+                    [ Attr.style "padding" "1.5rem" ]
+                    [ Html.div
+                        [ Attr.style "display" "grid"
+                        , Attr.style "gap" "0.75rem"
+                        ]
+                        (List.map viewMemberSelectionItem model.members)
+                    , Html.div
+                        [ Attr.style "margin-top" "1rem"
+                        , Attr.style "padding-top" "1rem"
+                        , Attr.style "border-top" "1px solid #e5e7eb"
+                        ]
+                        [ Html.button
+                            [ Events.onClick ShowCreateMemberInModal
+                            , Attr.style "width" "100%"
+                            , Attr.style "padding" "0.75rem"
+                            , Attr.style "border" "1px solid #3b82f6"
+                            , Attr.style "border-radius" "0.375rem"
+                            , Attr.style "background-color" "white"
+                            , Attr.style "color" "#3b82f6"
+                            , Attr.style "cursor" "pointer"
+                            , Attr.style "transition" "all 0.2s"
+                            , Attr.style "font-weight" "500"
+                            ]
+                            [ Html.text "➕ Mitglied hinzufügen" ]
+                        ]
+                    ]
+                ]
+            ]
+
+
+viewCreateMemberInModal : Model -> Team -> Html FrontendMsg
+viewCreateMemberInModal model team =
     Html.div
         [ Attr.style "position" "fixed"
         , Attr.style "top" "0"
@@ -1545,29 +1949,214 @@ viewMemberSelectionModal model team =
                 [ Attr.style "padding" "1.5rem"
                 , Attr.style "border-bottom" "1px solid #e5e7eb"
                 ]
-                [ Html.h3
-                    [ Attr.style "font-size" "1.25rem"
-                    , Attr.style "font-weight" "600"
-                    , Attr.style "color" "#1e293b"
-                    , Attr.style "margin" "0"
-                    , Attr.style "text-align" "center"
+                [ Html.div
+                    [ Attr.style "display" "flex"
+                    , Attr.style "align-items" "center"
+                    , Attr.style "gap" "0.5rem"
                     ]
-                    [ Html.text "Wer bist du?" ]
-                , Html.p
-                    [ Attr.style "color" "#64748b"
-                    , Attr.style "margin-top" "0.5rem"
-                    , Attr.style "margin-bottom" "0"
-                    , Attr.style "text-align" "center"
+                    [ Html.button
+                        [ Events.onClick HideCreateMemberInModal
+                        , Attr.style "background" "none"
+                        , Attr.style "border" "none"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "padding" "0.25rem"
+                        , Attr.style "border-radius" "0.25rem"
+                        , Attr.style "color" "#6b7280"
+                        ]
+                        [ Html.text "←" ]
+                    , Html.h3
+                        [ Attr.style "font-size" "1.25rem"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#1e293b"
+                        , Attr.style "margin" "0"
+                        ]
+                        [ Html.text "Mitglied hinzufügen" ]
                     ]
-                    [ Html.text "Wähle deinen Namen aus der Liste der Mannschaftsmitglieder." ]
                 ]
             , Html.div
                 [ Attr.style "padding" "1.5rem" ]
                 [ Html.div
-                    [ Attr.style "display" "grid"
-                    , Attr.style "gap" "0.75rem"
+                    [ Attr.style "margin-bottom" "1rem" ]
+                    [ Html.label
+                        [ Attr.style "display" "block"
+                        , Attr.style "font-weight" "500"
+                        , Attr.style "color" "#374151"
+                        , Attr.style "margin-bottom" "0.5rem"
+                        ]
+                        [ Html.text "Name *" ]
+                    , Html.input
+                        [ Attr.type_ "text"
+                        , Attr.placeholder "Dein Name"
+                        , Attr.value model.createMemberForm.name
+                        , Events.onInput (\value -> CreateMemberFormUpdated { name = value })
+                        , Attr.style "width" "100%"
+                        , Attr.style "padding" "0.75rem"
+                        , Attr.style "border" "1px solid #d1d5db"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "font-size" "1rem"
+                        ]
+                        []
                     ]
-                    (List.map viewMemberSelectionItem model.members)
+                , Html.div
+                    [ Attr.style "display" "flex"
+                    , Attr.style "gap" "0.75rem"
+                    , Attr.style "margin-top" "1.5rem"
+                    ]
+                    [ Html.button
+                        [ Events.onClick HideCreateMemberInModal
+                        , Attr.style "flex" "1"
+                        , Attr.style "padding" "0.75rem"
+                        , Attr.style "border" "1px solid #d1d5db"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "background-color" "white"
+                        , Attr.style "color" "#374151"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "font-weight" "500"
+                        ]
+                        [ Html.text "Abbrechen" ]
+                    , Html.button
+                        [ Events.onClick (CreateMemberSubmitted team.id)
+                        , Attr.style "flex" "1"
+                        , Attr.style "padding" "0.75rem"
+                        , Attr.style "border" "none"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "background-color" "#3b82f6"
+                        , Attr.style "color" "white"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "font-weight" "500"
+                        , Attr.disabled (String.isEmpty model.createMemberForm.name)
+                        ]
+                        [ Html.text "Hinzufügen" ]
+                    ]
+                ]
+            ]
+        ]
+
+
+viewChangeMatchDateModal : Model -> Html FrontendMsg
+viewChangeMatchDateModal model =
+    Html.div
+        [ Attr.style "position" "fixed"
+        , Attr.style "top" "0"
+        , Attr.style "left" "0"
+        , Attr.style "width" "100%"
+        , Attr.style "height" "100%"
+        , Attr.style "background-color" "rgba(0,0,0,0.5)"
+        , Attr.style "display" "flex"
+        , Attr.style "justify-content" "center"
+        , Attr.style "align-items" "center"
+        , Attr.style "z-index" "1000"
+        , Events.onClick HideChangeMatchDateModal
+        ]
+        [ Html.div
+            [ Attr.style "background-color" "white"
+            , Attr.style "border-radius" "0.75rem"
+            , Attr.style "box-shadow" "0 10px 25px rgba(0,0,0,0.25)"
+            , Attr.style "max-width" "500px"
+            , Attr.style "width" "95%"
+            , Attr.style "margin" "1rem"
+            , Attr.style "max-height" "90vh"
+            , Attr.style "overflow-y" "auto"
+            , Events.stopPropagationOn "click" (Json.Decode.succeed ( NoOpFrontendMsg, True ))
+            ]
+            [ Html.div
+                [ Attr.style "padding" "1.5rem"
+                , Attr.style "border-bottom" "1px solid #e5e7eb"
+                ]
+                [ Html.div
+                    [ Attr.style "display" "flex"
+                    , Attr.style "justify-content" "space-between"
+                    , Attr.style "align-items" "center"
+                    ]
+                    [ Html.h3
+                        [ Attr.style "font-size" "1.25rem"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#1e293b"
+                        , Attr.style "margin" "0"
+                        ]
+                        [ Html.text "Spieldatum ändern" ]
+                    , Html.button
+                        [ Events.onClick HideChangeMatchDateModal
+                        , Attr.style "background" "none"
+                        , Attr.style "border" "none"
+                        , Attr.style "font-size" "1.5rem"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "color" "#6b7280"
+                        ]
+                        [ Html.text "×" ]
+                    ]
+                ]
+            , Html.form
+                [ Events.onSubmit
+                    (case model.changeMatchDateMatchId of
+                        Just matchId ->
+                            ChangeMatchDateSubmitted matchId model.changeMatchDateForm
+
+                        Nothing ->
+                            NoOpFrontendMsg
+                    )
+                , Attr.style "padding" "1.5rem"
+                ]
+                [ Html.div
+                    [ Attr.style "margin-bottom" "1.5rem" ]
+                    [ Html.label
+                        [ Attr.style "display" "block"
+                        , Attr.style "font-weight" "500"
+                        , Attr.style "color" "#374151"
+                        , Attr.style "margin-bottom" "0.5rem"
+                        ]
+                        [ Html.text "Neues Datum" ]
+                    , Html.input
+                        [ Attr.type_ "text"
+                        , Attr.value model.changeMatchDateForm
+                        , Events.onInput
+                            (\newDate ->
+                                case model.changeMatchDateMatchId of
+                                    Just matchId ->
+                                        ChangeMatchDateFormUpdated matchId newDate
+
+                                    Nothing ->
+                                        NoOpFrontendMsg
+                            )
+                        , Attr.placeholder "25.12.2024"
+                        , Attr.style "width" "100%"
+                        , Attr.style "padding" "0.75rem"
+                        , Attr.style "border" "1px solid #d1d5db"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "font-size" "1rem"
+                        ]
+                        []
+                    ]
+                , Html.div
+                    [ Attr.style "display" "flex"
+                    , Attr.style "gap" "1rem"
+                    , Attr.style "justify-content" "flex-end"
+                    ]
+                    [ Html.button
+                        [ Attr.type_ "button"
+                        , Events.onClick HideChangeMatchDateModal
+                        , Attr.style "padding" "0.75rem 1.5rem"
+                        , Attr.style "border" "1px solid #d1d5db"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "background-color" "white"
+                        , Attr.style "color" "#374151"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "font-weight" "500"
+                        ]
+                        [ Html.text "Abbrechen" ]
+                    , Html.button
+                        [ Attr.type_ "submit"
+                        , Attr.style "padding" "0.75rem 1.5rem"
+                        , Attr.style "border" "none"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "background-color" "#ef4444"
+                        , Attr.style "color" "white"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "font-weight" "500"
+                        , Attr.disabled (String.isEmpty model.changeMatchDateForm)
+                        ]
+                        [ Html.text "Datum ändern" ]
+                    ]
                 ]
             ]
         ]
@@ -1635,7 +2224,7 @@ viewAvailabilityControls memberId matchId currentAvailability =
 viewAvailabilityButton : String -> String -> Availability -> String -> Bool -> Html FrontendMsg
 viewAvailabilityButton memberId matchId availability icon isSelected =
     Html.button
-        [ Events.onClick (SetAvailability memberId matchId availability)
+        [ Events.stopPropagationOn "click" (Json.Decode.succeed ( SetAvailability memberId matchId availability, True ))
         , Attr.style "background-color"
             (if isSelected then
                 availabilityToColor availability
@@ -1720,7 +2309,7 @@ viewAvailabilityOverview matchId members availability =
                   else
                     Html.text ""
                 , if noResponses > 0 then
-                    viewAvailabilitySummaryBadge "−" (String.fromInt noResponses) "#9ca3af"
+                    viewAvailabilitySummaryBadge "?" (String.fromInt noResponses) "#9ca3af"
 
                   else
                     Html.text ""
@@ -1799,7 +2388,7 @@ viewMatchDetailsExpanded matchId members availability =
             [ viewAvailabilityGroup "Verfügbar" "#10b981" "✓" groupedMembers.available
             , viewAvailabilityGroup "Vielleicht" "#f59e0b" "?" groupedMembers.maybe
             , viewAvailabilityGroup "Nicht verfügbar" "#ef4444" "✗" groupedMembers.notAvailable
-            , viewAvailabilityGroup "Keine Antwort" "#9ca3af" "−" groupedMembers.noResponse
+            , viewAvailabilityGroup "Keine Antwort" "#9ca3af" "?" groupedMembers.noResponse
             ]
         ]
 

@@ -343,5 +343,64 @@ updateFromFrontend sessionId clientId msg model =
                 Nothing ->
                     ( model, Cmd.none )
 
+        ChangeMatchDateRequest matchId newDate teamId ->
+            case Dict.get teamId model.teams of
+                Just teamData ->
+                    let
+                        -- Find the match in the team's seasons and update it
+                        updateMatchInSeasons seasons =
+                            Dict.map
+                                (\season seasonData ->
+                                    let
+                                        updatedHinrunde =
+                                            List.map
+                                                (\match ->
+                                                    if match.id == matchId then
+                                                        { match | date = newDate }
+
+                                                    else
+                                                        match
+                                                )
+                                                seasonData.hinrunde
+
+                                        updatedRückrunde =
+                                            List.map
+                                                (\match ->
+                                                    if match.id == matchId then
+                                                        { match | date = newDate }
+
+                                                    else
+                                                        match
+                                                )
+                                                seasonData.rückrunde
+                                    in
+                                    { seasonData | hinrunde = updatedHinrunde, rückrunde = updatedRückrunde }
+                                )
+                                seasons
+
+                        -- Remove all availability records for this match
+                        clearMatchAvailability availability =
+                            Dict.map
+                                (\memberId memberAvailability ->
+                                    Dict.remove matchId memberAvailability
+                                )
+                                availability
+
+                        updatedTeamData =
+                            { teamData
+                                | seasons = updateMatchInSeasons teamData.seasons
+                                , availability = clearMatchAvailability teamData.availability
+                            }
+
+                        updatedModel =
+                            { model | teams = Dict.insert teamId updatedTeamData model.teams }
+                    in
+                    ( updatedModel
+                    , sendToTeamSessions teamId (MatchDateChanged matchId newDate) updatedModel
+                    )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
         NoOpToBackend ->
             ( model, Cmd.none )

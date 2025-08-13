@@ -41,7 +41,7 @@ type SeasonHalf
 type alias Match =
     { id : String
     , opponent : String
-    , date : String -- ISO format for easy sorting: "2024-12-25"
+    , date : String -- German format for display: "25.12.2024"
     , time : String -- "14:30"
     , isHome : Bool
     , venue : String
@@ -103,7 +103,13 @@ type alias FrontendModel =
     , showCreateMatchModal : Bool
     , showCreateMemberModal : Bool
     , showMemberSelectionModal : Bool
+    , showCreateMemberInModal : Bool
+    , showChangeMatchDateModal : Bool
+    , changeMatchDateForm : String -- New date for the match being edited
+    , changeMatchDateMatchId : Maybe String -- ID of the match being edited
     , expandedMatches : List String -- Match IDs that are expanded
+    , pastMatchesShown : Int -- Number of past matches currently shown
+    , pastMatchesExpanded : Bool -- Whether past matches section is expanded
     , hostname : Maybe String -- Current hostname from JavaScript
     }
 
@@ -169,10 +175,18 @@ type FrontendMsg
     | ShowMemberSelectionModal
     | HideMemberSelectionModal
     | SelectActiveMember String
+    | ShowCreateMemberInModal
+    | HideCreateMemberInModal
     | LocalStorageMessage String
     | LogoutRequested
     | SetAvailability String String Availability
     | ToggleMatchDetails String
+    | LoadMorePastMatches
+    | TogglePastMatchesSection
+    | ShowChangeMatchDateModal String
+    | HideChangeMatchDateModal
+    | ChangeMatchDateFormUpdated String String
+    | ChangeMatchDateSubmitted String String
     | NoOpFrontendMsg
 
 
@@ -182,6 +196,7 @@ type ToBackend
     | CreateMatchRequest TeamId CreateMatchForm
     | CreateMemberRequest TeamId CreateMemberForm
     | UpdateAvailabilityRequest String String Availability
+    | ChangeMatchDateRequest String String String -- matchId, newDate, teamId
     | NoOpToBackend
 
 
@@ -196,4 +211,5 @@ type ToFrontend
     | MatchCreated Match
     | MemberCreated Member
     | AvailabilityUpdated AvailabilityRecord
+    | MatchDateChanged String String -- matchId, newDate
     | NoOpToFrontend

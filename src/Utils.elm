@@ -1,4 +1,4 @@
-module Utils exposing (createSlug, createTeamUrl, extractTeamIdFromUrl, generateMatchId, generateMemberId, generateRandomTeamId, getAllMatches, getCurrentSeason, getSeasonHalf, sortMatchesByDate)
+module Utils exposing (createSlug, createTeamUrl, extractTeamIdFromUrl, generateMatchId, generateMemberId, generateRandomTeamId, getAllMatches, getCurrentSeason, getSeasonHalf, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByDate)
 
 import Char
 import Dict exposing (Dict)
@@ -145,8 +145,8 @@ getSeasonHalf :
     String
     -> String -- SeasonHalf would be imported, but avoiding circular import
 getSeasonHalf dateStr =
-    case String.split "-" dateStr of
-        [ year, month, _ ] ->
+    case String.split "." dateStr of
+        [ day, month, year ] ->
             case String.toInt month of
                 Just monthInt ->
                     if monthInt >= 8 || monthInt <= 1 then
@@ -163,12 +163,49 @@ getSeasonHalf dateStr =
 
 
 
--- Sort matches by date
+-- Sort matches by date (newest first for past, earliest first for future)
 
 
 sortMatchesByDate : List { a | date : String } -> List { a | date : String }
 sortMatchesByDate matches =
-    List.sortBy .date matches
+    let
+        -- Convert German date format (dd.mm.yyyy) to sortable format (yyyy-mm-dd)
+        convertToSortable : String -> String
+        convertToSortable dateStr =
+            case String.split "." dateStr of
+                [ day, month, year ] ->
+                    year ++ "-" ++ String.padLeft 2 '0' month ++ "-" ++ String.padLeft 2 '0' day
+
+                _ ->
+                    dateStr
+    in
+    List.sortWith (\a b -> compare (convertToSortable b.date) (convertToSortable a.date)) matches
+
+
+
+-- Separate past and future matches
+
+
+separatePastAndFutureMatches : List { a | date : String } -> ( List { a | date : String }, List { a | date : String } )
+separatePastAndFutureMatches matches =
+    let
+        -- For now, use a hardcoded date. In a real app, you'd get this from Time.now
+        -- This separates matches into past (before today) and future (today and after)
+        today =
+            "13.08.2025"
+
+        -- Current date for testing (German format)
+        -- Convert German date format (dd.mm.yyyy) to sortable format (yyyy-mm-dd)
+        convertToSortable : String -> String
+        convertToSortable dateStr =
+            case String.split "." dateStr of
+                [ day, month, year ] ->
+                    year ++ "-" ++ String.padLeft 2 '0' month ++ "-" ++ String.padLeft 2 '0' day
+
+                _ ->
+                    dateStr
+    in
+    List.partition (\match -> convertToSortable match.date < convertToSortable today) matches
 
 
 
@@ -178,3 +215,17 @@ sortMatchesByDate matches =
 getAllMatches : { hinrunde : List a, rückrunde : List a } -> List a
 getAllMatches seasonData =
     seasonData.hinrunde ++ seasonData.rückrunde
+
+
+
+-- Convert ISO date format (yyyy-mm-dd) to German format (dd.mm.yyyy)
+
+
+isoToGermanDate : String -> String
+isoToGermanDate isoDate =
+    case String.split "-" isoDate of
+        [ year, month, day ] ->
+            day ++ "." ++ month ++ "." ++ year
+
+        _ ->
+            isoDate
