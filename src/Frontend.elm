@@ -1149,13 +1149,23 @@ viewMatchesSection model team =
         ( pastMatches, futureMatches ) =
             separatePastAndFutureMatches model.matches
 
+        -- Convert German date (dd.mm.yyyy) to sortable format (yyyy-mm-dd)
+        germanDateToSortable : String -> String
+        germanDateToSortable dateStr =
+            case String.split "." dateStr of
+                [ day, month, year ] ->
+                    year ++ "-" ++ month ++ "-" ++ day
+
+                _ ->
+                    dateStr
+
         -- Sort past matches by oldest first (chronological order)
         sortedPastMatches =
-            List.sortWith (\a b -> compare a.date b.date) pastMatches
+            List.sortWith (\a b -> compare (germanDateToSortable a.date) (germanDateToSortable b.date)) pastMatches
 
         -- Sort future matches by earliest first (next match at top)
         sortedFutureMatches =
-            List.sortWith (\a b -> compare a.date b.date) futureMatches
+            List.sortWith (\a b -> compare (germanDateToSortable a.date) (germanDateToSortable b.date)) futureMatches
 
         pastMatchesToShow =
             List.take model.pastMatchesShown sortedPastMatches
