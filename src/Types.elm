@@ -107,6 +107,7 @@ type alias FrontendModel =
     , showChangeMatchDateModal : Bool
     , changeMatchDateForm : String -- New date for the match being edited
     , changeMatchDateMatchId : Maybe String -- ID of the match being edited
+    , showShareModal : Bool
     , expandedMatches : List String -- Match IDs that are expanded
     , pastMatchesShown : Int -- Number of past matches currently shown
     , pastMatchesExpanded : Bool -- Whether past matches section is expanded
@@ -187,6 +188,8 @@ type FrontendMsg
     | HideChangeMatchDateModal
     | ChangeMatchDateFormUpdated String String
     | ChangeMatchDateSubmitted String String
+    | ShowShareModal
+    | HideShareModal
     | NoOpFrontendMsg
 
 

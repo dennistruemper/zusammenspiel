@@ -9,6 +9,7 @@ import Html.Events as Events
 import Json.Decode
 import Lamdera
 import LocalStorage
+import QRCode
 import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
@@ -52,6 +53,7 @@ init url key =
             , showChangeMatchDateModal = False
             , changeMatchDateForm = ""
             , changeMatchDateMatchId = Nothing
+            , showShareModal = False
             , expandedMatches = []
             , pastMatchesShown = 10
             , pastMatchesExpanded = False
@@ -313,6 +315,12 @@ update msg model =
 
                 Nothing ->
                     ( model, Cmd.none )
+
+        ShowShareModal ->
+            ( { model | showShareModal = True }, Cmd.none )
+
+        HideShareModal ->
+            ( { model | showShareModal = False }, Cmd.none )
 
         NoOpFrontendMsg ->
             ( model, Cmd.none )
@@ -775,14 +783,41 @@ viewTeamPage model =
     case model.currentTeam of
         Just team ->
             Html.div []
-                [ Html.h2
-                    [ Attr.style "font-size" "1.75rem"
-                    , Attr.style "font-weight" "600"
-                    , Attr.style "color" "#1e293b"
+                [ Html.div
+                    [ Attr.style "display" "flex"
+                    , Attr.style "justify-content" "space-between"
+                    , Attr.style "align-items" "center"
                     , Attr.style "margin-bottom" "2rem"
                     , Attr.style "width" "100%"
                     ]
-                    [ Html.text team.name ]
+                    [ Html.h2
+                        [ Attr.style "font-size" "1.75rem"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#1e293b"
+                        , Attr.style "margin" "0"
+                        ]
+                        [ Html.text team.name ]
+                    , Html.button
+                        [ Events.onClick ShowShareModal
+                        , Attr.style "background-color" "#3b82f6"
+                        , Attr.style "color" "white"
+                        , Attr.style "border" "none"
+                        , Attr.style "border-radius" "0.5rem"
+                        , Attr.style "padding" "0.75rem 1rem"
+                        , Attr.style "font-size" "0.875rem"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "transition" "background-color 0.2s"
+                        , Attr.style "min-width" "44px"
+                        , Attr.style "min-height" "44px"
+                        , Attr.style "display" "flex"
+                        , Attr.style "align-items" "center"
+                        , Attr.style "justify-content" "center"
+                        , Attr.style "gap" "0.5rem"
+                        ]
+                        [ Html.text "↗️"
+                        , Html.text "Teilen"
+                        ]
+                    ]
                 , if List.isEmpty model.matches then
                     Html.div
                         [ Attr.style "background-color" "white"
@@ -841,6 +876,11 @@ viewTeamPage model =
                     Html.text ""
                 , if model.showChangeMatchDateModal then
                     viewChangeMatchDateModal model
+
+                  else
+                    Html.text ""
+                , if model.showShareModal then
+                    viewShareModal model team
 
                   else
                     Html.text ""
@@ -1157,8 +1197,13 @@ viewMatchesSection model team =
                 , Attr.style "transition" "background-color 0.2s"
                 , Attr.style "min-height" "44px"
                 , Attr.style "flex-shrink" "0"
+                , Attr.style "display" "flex"
+                , Attr.style "align-items" "center"
+                , Attr.style "gap" "0.5rem"
                 ]
-                [ Html.text "+ Spiel hinzufügen" ]
+                [ Html.text "+"
+                , Html.text "Spiel hinzufügen"
+                ]
             ]
         , if List.isEmpty model.matches then
             Html.div
@@ -1676,8 +1721,13 @@ viewMembersSection model team =
                 , Attr.style "transition" "background-color 0.2s"
                 , Attr.style "min-height" "44px"
                 , Attr.style "flex-shrink" "0"
+                , Attr.style "display" "flex"
+                , Attr.style "align-items" "center"
+                , Attr.style "gap" "0.5rem"
                 ]
-                [ Html.text "+ Mitglied hinzufügen" ]
+                [ Html.text "+"
+                , Html.text "Mitglied hinzufügen"
+                ]
             ]
         , if List.isEmpty model.members then
             Html.div
@@ -2468,4 +2518,158 @@ viewMemberInGroup member =
             , Attr.style "color" "#374151"
             ]
             [ Html.text member.name ]
+        ]
+
+
+viewShareSection : Model -> Team -> Html FrontendMsg
+viewShareSection model team =
+    Html.div
+        [ Attr.style "margin-top" "2rem"
+        , Attr.style "background-color" "white"
+        , Attr.style "padding" "1.5rem"
+        , Attr.style "border-radius" "0.5rem"
+        , Attr.style "box-shadow" "0 1px 3px rgba(0,0,0,0.1)"
+        ]
+        [ Html.h3
+            [ Attr.style "font-size" "1.125rem"
+            , Attr.style "font-weight" "600"
+            , Attr.style "color" "#1e293b"
+            , Attr.style "margin" "0 0 1rem 0"
+            ]
+            [ Html.text "Team teilen" ]
+        , Html.p
+            [ Attr.style "color" "#64748b"
+            , Attr.style "margin-bottom" "1rem"
+            , Attr.style "font-size" "0.875rem"
+            ]
+            [ Html.text "Teile diesen Link mit deinen Mannschaftsmitgliedern, damit sie Zugang zur Mannschaft haben:" ]
+        , Html.div
+            [ Attr.style "background-color" "#f8fafc"
+            , Attr.style "padding" "1rem"
+            , Attr.style "border-radius" "0.375rem"
+            , Attr.style "border" "1px solid #e2e8f0"
+            , Attr.style "font-family" "monospace"
+            , Attr.style "font-size" "0.875rem"
+            , Attr.style "word-break" "break-all"
+            , Attr.style "margin-bottom" "1rem"
+            ]
+            [ Html.text (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id) ]
+        , Html.p
+            [ Attr.style "color" "#64748b"
+            , Attr.style "font-size" "0.875rem"
+            , Attr.style "margin" "0"
+            ]
+            [ Html.text "💡 Tipp: Speichere diese Seite als Lesezeichen für einfachen Zugang." ]
+        ]
+
+
+viewShareModal : Model -> Team -> Html FrontendMsg
+viewShareModal model team =
+    Html.div
+        [ Attr.style "position" "fixed"
+        , Attr.style "top" "0"
+        , Attr.style "left" "0"
+        , Attr.style "width" "100%"
+        , Attr.style "height" "100%"
+        , Attr.style "background-color" "rgba(0,0,0,0.5)"
+        , Attr.style "display" "flex"
+        , Attr.style "justify-content" "center"
+        , Attr.style "align-items" "center"
+        , Attr.style "z-index" "1000"
+        , Events.onClick HideShareModal
+        ]
+        [ Html.div
+            [ Attr.style "background-color" "white"
+            , Attr.style "border-radius" "0.75rem"
+            , Attr.style "box-shadow" "0 10px 25px rgba(0,0,0,0.25)"
+            , Attr.style "max-width" "500px"
+            , Attr.style "width" "95%"
+            , Attr.style "margin" "1rem"
+            , Attr.style "max-height" "90vh"
+            , Attr.style "overflow-y" "auto"
+            , Events.stopPropagationOn "click" (Json.Decode.succeed ( NoOpFrontendMsg, True ))
+            ]
+            [ Html.div
+                [ Attr.style "padding" "1.5rem"
+                , Attr.style "border-bottom" "1px solid #e5e7eb"
+                ]
+                [ Html.div
+                    [ Attr.style "display" "flex"
+                    , Attr.style "justify-content" "space-between"
+                    , Attr.style "align-items" "center"
+                    ]
+                    [ Html.h3
+                        [ Attr.style "font-size" "1.25rem"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#1e293b"
+                        , Attr.style "margin" "0"
+                        ]
+                        [ Html.text "Team teilen" ]
+                    , Html.button
+                        [ Events.onClick HideShareModal
+                        , Attr.style "background" "none"
+                        , Attr.style "border" "none"
+                        , Attr.style "font-size" "1.5rem"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "color" "#6b7280"
+                        ]
+                        [ Html.text "×" ]
+                    ]
+                ]
+            , Html.div
+                [ Attr.style "padding" "1.5rem" ]
+                [ Html.p
+                    [ Attr.style "color" "#64748b"
+                    , Attr.style "margin-bottom" "1rem"
+                    , Attr.style "font-size" "0.875rem"
+                    ]
+                    [ Html.text "Teile diesen Link mit deinen Mannschaftsmitgliedern, damit sie Zugang zur Mannschaft haben:" ]
+                , Html.div
+                    [ Attr.style "background-color" "#f8fafc"
+                    , Attr.style "padding" "1rem"
+                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "border" "1px solid #e2e8f0"
+                    , Attr.style "font-family" "monospace"
+                    , Attr.style "font-size" "0.875rem"
+                    , Attr.style "word-break" "break-all"
+                    , Attr.style "margin-bottom" "1rem"
+                    ]
+                    [ Html.text (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id) ]
+                , Html.div
+                    [ Attr.style "text-align" "center"
+                    , Attr.style "margin-bottom" "1rem"
+                    ]
+                    [ Html.div
+                        [ Attr.style "display" "inline-block"
+                        , Attr.style "background-color" "white"
+                        , Attr.style "padding" "1rem"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "border" "1px solid #e2e8f0"
+                        ]
+                        [ case QRCode.fromString (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id) of
+                            Ok qrCode ->
+                                QRCode.toSvg
+                                    [ Attr.style "width" "200px"
+                                    , Attr.style "height" "200px"
+                                    , Attr.style "display" "block"
+                                    , Attr.style "margin" "0 auto"
+                                    ]
+                                    qrCode
+
+                            Err error ->
+                                Html.div
+                                    [ Attr.style "color" "red"
+                                    , Attr.style "font-size" "0.875rem"
+                                    ]
+                                    [ Html.text ("QR Code Fehler: " ++ Debug.toString error) ]
+                        ]
+                    ]
+                , Html.p
+                    [ Attr.style "color" "#64748b"
+                    , Attr.style "font-size" "0.875rem"
+                    , Attr.style "margin" "0"
+                    ]
+                    [ Html.text "💡 Tipp: Speichere diese Seite als Lesezeichen für einfachen Zugang." ]
+                ]
+            ]
         ]
