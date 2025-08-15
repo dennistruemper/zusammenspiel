@@ -2661,7 +2661,7 @@ viewShareModal model team =
                                     [ Attr.style "color" "red"
                                     , Attr.style "font-size" "0.875rem"
                                     ]
-                                    [ Html.text ("QR Code Fehler: " ++ Debug.toString error) ]
+                                    [ Html.text "QR Code Fehler: " ]
                         ]
                     ]
                 , Html.p
