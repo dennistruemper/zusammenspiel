@@ -22,6 +22,7 @@ type alias Team =
     , slug : String
     , playersNeeded : Int
     , createdAt : Int
+    , accessCode : String
     }
 
 
@@ -112,6 +113,9 @@ type alias FrontendModel =
     , pastMatchesShown : Int -- Number of past matches currently shown
     , pastMatchesExpanded : Bool -- Whether past matches section is expanded
     , hostname : Maybe String -- Current hostname from JavaScript
+    , confirmedTeamCodes : Dict TeamId String -- teamId -> accessCode
+    , accessCodeRequired : Maybe TeamId
+    , enteredAccessCode : String -- Track the currently entered access code
     }
 
 
@@ -127,6 +131,7 @@ type alias CreateTeamForm =
     , creatorName : String
     , otherMemberNames : String
     , playersNeeded : String
+    , accessCode : String
     }
 
 
@@ -190,16 +195,22 @@ type FrontendMsg
     | ChangeMatchDateSubmitted String String
     | ShowShareModal
     | HideShareModal
+    | SubmitAccessCodeRequested TeamId String -- teamId, accessCode
+    | AccessCodeInputChanged TeamId String -- teamId, accessCode (for input field)
+    | GetAccessCode TeamId -- Request access code from localStorage
+    | AccessCodeLoaded TeamId String -- Access code loaded from localStorage (teamId, accessCode)
+    | CopyToClipboard String -- Copy text to clipboard
     | NoOpFrontendMsg
 
 
 type ToBackend
-    = CreateTeamRequest String String (List String) Int
-    | GetTeamRequest TeamId
-    | CreateMatchRequest TeamId CreateMatchForm
-    | CreateMemberRequest TeamId CreateMemberForm
-    | UpdateAvailabilityRequest String String Availability
-    | ChangeMatchDateRequest String String String -- matchId, newDate, teamId
+    = CreateTeamRequest String String (List String) Int String
+    | GetTeamRequest TeamId String -- teamId, accessCode
+    | SubmitAccessCode TeamId String -- teamId, accessCode
+    | CreateMatchRequest TeamId CreateMatchForm String -- teamId, form, accessCode
+    | CreateMemberRequest TeamId CreateMemberForm String -- teamId, form, accessCode
+    | UpdateAvailabilityRequest String String Availability String -- memberId, matchId, availability, accessCode
+    | ChangeMatchDateRequest String String String String -- matchId, newDate, teamId, accessCode
     | NoOpToBackend
 
 
@@ -208,9 +219,10 @@ type BackendMsg
 
 
 type ToFrontend
-    = TeamCreated Team String -- Team and creator member ID
+    = TeamCreated Team String String -- Team, creator member ID, and access code
     | TeamLoaded Team (List Match) (List Member) (List AvailabilityRecord)
     | TeamNotFound
+    | AccessCodeRequired TeamId -- Request access code for team access
     | MatchCreated Match
     | MemberCreated Member
     | AvailabilityUpdated AvailabilityRecord

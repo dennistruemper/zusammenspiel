@@ -3,6 +3,7 @@ module Frontend exposing (..)
 import Basics exposing (min)
 import Browser exposing (UrlRequest(..))
 import Browser.Navigation as Nav
+import Dict
 import Html exposing (Html)
 import Html.Attributes as Attr
 import Html.Events as Events
@@ -13,7 +14,7 @@ import QRCode
 import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
-import Utils exposing (createTeamUrl, extractTeamIdFromUrl, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByDate)
+import Utils exposing (createTeamUrl, extractAccessCodeFromUrl, extractTeamIdFromUrl, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByDate)
 
 
 type alias Model =
@@ -43,7 +44,7 @@ init url key =
             , page = page
             , currentTeam = Nothing
             , activeMemberId = Nothing
-            , createTeamForm = { name = "", creatorName = "", otherMemberNames = "", playersNeeded = "" }
+            , createTeamForm = { name = "", creatorName = "", otherMemberNames = "", playersNeeded = "", accessCode = "" }
             , createMatchForm = { opponent = "", date = "", time = "", venue = "", isHome = True }
             , createMemberForm = { name = "" }
             , showCreateMatchModal = False
@@ -61,20 +62,43 @@ init url key =
             , members = []
             , availability = []
             , hostname = Nothing
+            , confirmedTeamCodes = Dict.empty
+            , accessCodeRequired = Nothing
+            , enteredAccessCode = ""
             }
 
-        cmd =
+        ( updatedModel, cmd ) =
             case page of
                 TeamPage teamId ->
-                    Cmd.batch
+                    let
+                        urlAccessCode =
+                            extractAccessCodeFromUrl (Url.toString url)
+                                |> Maybe.withDefault ""
+
+                        modelWithAccessCode =
+                            if String.length urlAccessCode == 4 then
+                                { initialModel
+                                    | confirmedTeamCodes = Dict.insert teamId urlAccessCode initialModel.confirmedTeamCodes
+                                }
+
+                            else
+                                initialModel
+                    in
+                    ( modelWithAccessCode
+                    , Cmd.batch
                         [ LocalStorage.toJS "GET_HOSTNAME"
-                        , Lamdera.sendToBackend (GetTeamRequest teamId)
+                        , if String.length urlAccessCode == 4 then
+                            Lamdera.sendToBackend (GetTeamRequest teamId urlAccessCode)
+
+                          else
+                            LocalStorage.toJS ("GET_ACCESS_CODE:" ++ teamId)
                         ]
+                    )
 
                 _ ->
-                    LocalStorage.toJS "GET_HOSTNAME"
+                    ( initialModel, LocalStorage.toJS "GET_HOSTNAME" )
     in
-    ( initialModel, cmd )
+    ( updatedModel, cmd )
 
 
 parseUrl : Url.Url -> Page
@@ -125,15 +149,37 @@ update msg model =
                 newPage =
                     parseUrl url
 
-                cmd =
+                ( updatedModel, cmd ) =
                     case newPage of
                         TeamPage teamId ->
-                            Lamdera.sendToBackend (GetTeamRequest teamId)
+                            let
+                                urlAccessCode =
+                                    extractAccessCodeFromUrl (Url.toString url)
+                                        |> Maybe.withDefault ""
+
+                                -- Priority: URL > localStorage > manual entry
+                                modelWithAccessCode =
+                                    if String.length urlAccessCode == 4 then
+                                        { model
+                                            | accessCodeRequired = Nothing
+                                            , confirmedTeamCodes = Dict.insert teamId urlAccessCode model.confirmedTeamCodes
+                                        }
+
+                                    else
+                                        model
+                            in
+                            ( { modelWithAccessCode | page = newPage }
+                            , if String.length urlAccessCode == 4 then
+                                Lamdera.sendToBackend (GetTeamRequest teamId urlAccessCode)
+
+                              else
+                                LocalStorage.toJS ("GET_ACCESS_CODE:" ++ teamId)
+                            )
 
                         _ ->
-                            Cmd.none
+                            ( model, Cmd.none )
             in
-            ( { model | page = newPage }, cmd )
+            ( { updatedModel | page = newPage }, cmd )
 
         CreateTeamFormUpdated form ->
             ( { model | createTeamForm = form }, Cmd.none )
@@ -157,7 +203,7 @@ update msg model =
                     -- Default to 11 if invalid
                 in
                 ( model
-                , Lamdera.sendToBackend (CreateTeamRequest model.createTeamForm.name model.createTeamForm.creatorName otherMemberNames playersNeeded)
+                , Lamdera.sendToBackend (CreateTeamRequest model.createTeamForm.name model.createTeamForm.creatorName otherMemberNames playersNeeded "")
                 )
 
         CreateMatchFormUpdated form ->
@@ -169,7 +215,7 @@ update msg model =
 
             else
                 ( { model | showCreateMatchModal = False, createMatchForm = { opponent = "", date = "", time = "", venue = "", isHome = True } }
-                , Lamdera.sendToBackend (CreateMatchRequest teamId model.createMatchForm)
+                , Lamdera.sendToBackend (CreateMatchRequest teamId model.createMatchForm (Dict.get teamId model.confirmedTeamCodes |> Maybe.withDefault ""))
                 )
 
         ShowCreateMatchModal ->
@@ -189,7 +235,7 @@ update msg model =
                 ( { model
                     | createMemberForm = { name = "" }
                   }
-                , Lamdera.sendToBackend (CreateMemberRequest teamId model.createMemberForm)
+                , Lamdera.sendToBackend (CreateMemberRequest teamId model.createMemberForm (Dict.get teamId model.confirmedTeamCodes |> Maybe.withDefault ""))
                 )
 
         ShowCreateMemberModal ->
@@ -252,9 +298,19 @@ update msg model =
             case model.activeMemberId of
                 Just activeMemberId ->
                     if activeMemberId == memberId then
-                        ( model
-                        , Lamdera.sendToBackend (UpdateAvailabilityRequest memberId matchId availability)
-                        )
+                        case model.currentTeam of
+                            Just team ->
+                                let
+                                    accessCode =
+                                        Dict.get team.id model.confirmedTeamCodes
+                                            |> Maybe.withDefault ""
+                                in
+                                ( model
+                                , Lamdera.sendToBackend (UpdateAvailabilityRequest memberId matchId availability accessCode)
+                                )
+
+                            Nothing ->
+                                ( model, Cmd.none )
 
                     else
                         ( model, Cmd.none )
@@ -310,7 +366,7 @@ update msg model =
             case model.currentTeam of
                 Just team ->
                     ( model
-                    , Lamdera.sendToBackend (ChangeMatchDateRequest matchId newDate team.id)
+                    , Lamdera.sendToBackend (ChangeMatchDateRequest matchId newDate team.id (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault ""))
                     )
 
                 Nothing ->
@@ -322,6 +378,50 @@ update msg model =
         HideShareModal ->
             ( { model | showShareModal = False }, Cmd.none )
 
+        SubmitAccessCodeRequested teamId accessCode ->
+            ( { model
+                | accessCodeRequired = Nothing
+                , confirmedTeamCodes = Dict.insert teamId accessCode model.confirmedTeamCodes
+              }
+            , Lamdera.sendToBackend (SubmitAccessCode teamId accessCode)
+            )
+
+        AccessCodeInputChanged teamId accessCode ->
+            let
+                updatedModel =
+                    { model | enteredAccessCode = accessCode }
+            in
+            if String.length accessCode == 4 then
+                ( { updatedModel | accessCodeRequired = Nothing }
+                , Cmd.batch
+                    [ Lamdera.sendToBackend (SubmitAccessCode teamId accessCode)
+                    , Lamdera.sendToBackend (GetTeamRequest teamId accessCode)
+                    , LocalStorage.toJS ("SET_ACCESS_CODE:" ++ teamId ++ ":" ++ accessCode)
+                    ]
+                )
+
+            else
+                ( updatedModel, Cmd.none )
+
+        CopyToClipboard text ->
+            ( model, LocalStorage.toJS ("COPY:" ++ text) )
+
+        GetAccessCode teamId ->
+            ( model, LocalStorage.toJS ("GET_ACCESS_CODE:" ++ teamId) )
+
+        AccessCodeLoaded teamId accessCode ->
+            if String.length accessCode == 4 then
+                ( { model
+                    | confirmedTeamCodes = Dict.insert teamId accessCode model.confirmedTeamCodes
+                    , accessCodeRequired = Nothing
+                  }
+                , Lamdera.sendToBackend (GetTeamRequest teamId accessCode)
+                )
+
+            else
+                ( { model | accessCodeRequired = Just teamId }, Cmd.none )
+
+        -- Placeholder for now
         NoOpFrontendMsg ->
             ( model, Cmd.none )
 
@@ -329,15 +429,21 @@ update msg model =
 updateFromBackend : ToFrontend -> Model -> ( Model, Cmd FrontendMsg )
 updateFromBackend msg model =
     case msg of
-        TeamCreated team creatorMemberId ->
+        TeamCreated team creatorMemberId accessCode ->
             let
                 teamUrl =
-                    createTeamUrl team.slug team.id
+                    createTeamUrl team.slug team.id accessCode
             in
-            ( { model | currentTeam = Just team, activeMemberId = Just creatorMemberId }
+            ( { model
+                | currentTeam = Just team
+                , activeMemberId = Just creatorMemberId
+                , confirmedTeamCodes = Dict.insert team.id accessCode model.confirmedTeamCodes
+                , accessCodeRequired = Nothing
+              }
             , Cmd.batch
                 [ Nav.pushUrl model.key teamUrl
                 , LocalStorage.toJS ("SET:" ++ creatorMemberId)
+                , LocalStorage.toJS ("SET_ACCESS_CODE:" ++ team.id ++ ":" ++ accessCode)
                 ]
             )
 
@@ -364,6 +470,9 @@ updateFromBackend msg model =
 
         TeamNotFound ->
             ( { model | page = NotFoundPage }, Cmd.none )
+
+        AccessCodeRequired teamId ->
+            ( { model | accessCodeRequired = Just teamId }, Cmd.none )
 
         MatchCreated match ->
             ( { model | matches = match :: model.matches }, Cmd.none )
@@ -587,7 +696,11 @@ viewContent model =
             viewCreateTeamPage model
 
         TeamPage _ ->
-            viewTeamPage model
+            if model.accessCodeRequired /= Nothing && model.currentTeam == Nothing then
+                viewAccessCodeRequired model
+
+            else
+                viewTeamPage model
 
         NotFoundPage ->
             viewNotFoundPage
@@ -663,7 +776,7 @@ viewCreateTeamPage model =
                 , Html.input
                     [ Attr.type_ "text"
                     , Attr.value model.createTeamForm.name
-                    , Events.onInput (\name -> CreateTeamFormUpdated { name = name, creatorName = model.createTeamForm.creatorName, otherMemberNames = model.createTeamForm.otherMemberNames, playersNeeded = model.createTeamForm.playersNeeded })
+                    , Events.onInput (\name -> CreateTeamFormUpdated { name = name, creatorName = model.createTeamForm.creatorName, otherMemberNames = model.createTeamForm.otherMemberNames, playersNeeded = model.createTeamForm.playersNeeded, accessCode = "" })
                     , Attr.placeholder "Teamname eingeben"
                     , Attr.style "width" "100%"
                     , Attr.style "padding" "0.75rem"
@@ -686,7 +799,7 @@ viewCreateTeamPage model =
                 , Html.input
                     [ Attr.type_ "text"
                     , Attr.value model.createTeamForm.creatorName
-                    , Events.onInput (\creatorName -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = creatorName, otherMemberNames = model.createTeamForm.otherMemberNames, playersNeeded = model.createTeamForm.playersNeeded })
+                    , Events.onInput (\creatorName -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = creatorName, otherMemberNames = model.createTeamForm.otherMemberNames, playersNeeded = model.createTeamForm.playersNeeded, accessCode = "" })
                     , Attr.placeholder "Dein Name"
                     , Attr.style "width" "100%"
                     , Attr.style "padding" "0.75rem"
@@ -708,7 +821,7 @@ viewCreateTeamPage model =
                     [ Html.text "Weitere Teammitglieder (optional)" ]
                 , Html.textarea
                     [ Attr.value model.createTeamForm.otherMemberNames
-                    , Events.onInput (\names -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = model.createTeamForm.creatorName, otherMemberNames = names, playersNeeded = model.createTeamForm.playersNeeded })
+                    , Events.onInput (\names -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = model.createTeamForm.creatorName, otherMemberNames = names, playersNeeded = model.createTeamForm.playersNeeded, accessCode = "" })
                     , Attr.placeholder "Namen durch Komma getrennt eingeben, z.B. Max Mustermann, Anna Schmidt, Tom Weber"
                     , Attr.style "width" "100%"
                     , Attr.style "padding" "0.75rem"
@@ -740,7 +853,7 @@ viewCreateTeamPage model =
                 , Html.input
                     [ Attr.type_ "number"
                     , Attr.value model.createTeamForm.playersNeeded
-                    , Events.onInput (\playersNeeded -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = model.createTeamForm.creatorName, otherMemberNames = model.createTeamForm.otherMemberNames, playersNeeded = playersNeeded })
+                    , Events.onInput (\playersNeeded -> CreateTeamFormUpdated { name = model.createTeamForm.name, creatorName = model.createTeamForm.creatorName, otherMemberNames = model.createTeamForm.otherMemberNames, playersNeeded = playersNeeded, accessCode = "" })
                     , Attr.placeholder "z.B. 11 für Fußball, 6 für Volleyball"
                     , Attr.min "1"
                     , Attr.max "50"
@@ -847,7 +960,7 @@ viewTeamPage model =
                             , Attr.style "font-size" "0.9rem"
                             , Attr.style "word-break" "break-all"
                             ]
-                            [ Html.text (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id) ]
+                            [ Html.text (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")) ]
                         , Html.p
                             [ Attr.style "color" "#64748b"
                             , Attr.style "margin-top" "1rem"
@@ -892,6 +1005,62 @@ viewTeamPage model =
                 , Attr.style "padding" "3rem 0"
                 ]
                 [ Html.text "Team wird geladen..." ]
+
+
+viewAccessCodeRequired : Model -> Html FrontendMsg
+viewAccessCodeRequired model =
+    case model.accessCodeRequired of
+        Just teamId ->
+            Html.div
+                [ Attr.style "max-width" "500px"
+                , Attr.style "margin" "0 auto"
+                , Attr.style "padding" "2rem 0"
+                ]
+                [ Html.div
+                    [ Attr.style "background-color" "white"
+                    , Attr.style "padding" "2rem"
+                    , Attr.style "border-radius" "0.5rem"
+                    , Attr.style "box-shadow" "0 1px 3px rgba(0,0,0,0.1)"
+                    , Attr.style "text-align" "center"
+                    ]
+                    [ Html.h2
+                        [ Attr.style "font-size" "1.75rem"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#1e293b"
+                        , Attr.style "margin-bottom" "1rem"
+                        ]
+                        [ Html.text "🔐 Zugangscode erforderlich" ]
+                    , Html.p
+                        [ Attr.style "color" "#64748b"
+                        , Attr.style "margin-bottom" "1.5rem"
+                        ]
+                        [ Html.text "Bitte gib den Zugangscode ein, um auf diese Mannschaft zuzugreifen:" ]
+                    , Html.input
+                        [ Attr.type_ "text"
+                        , Attr.placeholder "Zugangscode eingeben"
+                        , Attr.style "width" "100%"
+                        , Attr.style "max-width" "300px"
+                        , Attr.style "padding" "0.75rem"
+                        , Attr.style "border" "1px solid #d1d5db"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "font-size" "1rem"
+                        , Attr.style "margin-bottom" "1rem"
+                        , Attr.style "text-align" "center"
+                        , Attr.style "letter-spacing" "0.5em"
+                        , Attr.maxlength 4
+                        , Events.onInput (AccessCodeInputChanged teamId)
+                        ]
+                        []
+                    , Html.p
+                        [ Attr.style "color" "#6b7280"
+                        , Attr.style "font-size" "0.875rem"
+                        ]
+                        [ Html.text "Der Zugangscode wurde beim Erstellen der Mannschaft generiert und sollte dir vom Teamleiter mitgeteilt worden sein." ]
+                    ]
+                ]
+
+        Nothing ->
+            Html.text ""
 
 
 viewNotFoundPage : Html FrontendMsg
@@ -2563,7 +2732,7 @@ viewShareSection model team =
             , Attr.style "word-break" "break-all"
             , Attr.style "margin-bottom" "1rem"
             ]
-            [ Html.text (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id) ]
+            [ Html.text (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")) ]
         , Html.p
             [ Attr.style "color" "#64748b"
             , Attr.style "font-size" "0.875rem"
@@ -2635,16 +2804,99 @@ viewShareModal model team =
                     ]
                     [ Html.text "Teile diesen Link mit deinen Mannschaftsmitgliedern, damit sie Zugang zur Mannschaft haben:" ]
                 , Html.div
-                    [ Attr.style "background-color" "#f8fafc"
-                    , Attr.style "padding" "1rem"
-                    , Attr.style "border-radius" "0.375rem"
-                    , Attr.style "border" "1px solid #e2e8f0"
-                    , Attr.style "font-family" "monospace"
-                    , Attr.style "font-size" "0.875rem"
-                    , Attr.style "word-break" "break-all"
+                    [ Attr.style "display" "flex"
+                    , Attr.style "align-items" "center"
+                    , Attr.style "gap" "0.5rem"
                     , Attr.style "margin-bottom" "1rem"
                     ]
-                    [ Html.text (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id) ]
+                    [ Html.div
+                        [ Attr.style "flex" "1"
+                        , Attr.style "background-color" "#f8fafc"
+                        , Attr.style "padding" "1rem"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "border" "1px solid #e2e8f0"
+                        , Attr.style "font-family" "monospace"
+                        , Attr.style "font-size" "0.875rem"
+                        , Attr.style "word-break" "break-all"
+                        ]
+                        [ Html.text (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")) ]
+                    , Html.button
+                        [ Events.onClick (CopyToClipboard (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")))
+                        , Attr.style "background-color" "#3b82f6"
+                        , Attr.style "color" "white"
+                        , Attr.style "border" "none"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "padding" "0.75rem"
+                        , Attr.style "font-size" "0.875rem"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "transition" "background-color 0.2s"
+                        , Attr.style "min-width" "44px"
+                        , Attr.style "min-height" "44px"
+                        , Attr.style "display" "flex"
+                        , Attr.style "align-items" "center"
+                        , Attr.style "justify-content" "center"
+                        ]
+                        [ Html.text "📋" ]
+                    ]
+                , Html.div
+                    [ Attr.style "background-color" "#f0f9ff"
+                    , Attr.style "padding" "1rem"
+                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "border" "1px solid #0ea5e9"
+                    , Attr.style "margin-bottom" "1rem"
+                    ]
+                    [ Html.p
+                        [ Attr.style "color" "#0c4a6e"
+                        , Attr.style "font-weight" "500"
+                        , Attr.style "margin-bottom" "0.5rem"
+                        , Attr.style "margin-top" "0"
+                        ]
+                        [ Html.text "🔐 Zugangscode für dein Team:" ]
+                    , Html.div
+                        [ Attr.style "display" "flex"
+                        , Attr.style "align-items" "center"
+                        , Attr.style "gap" "0.5rem"
+                        ]
+                        [ Html.div
+                            [ Attr.style "flex" "1"
+                            , Attr.style "background-color" "white"
+                            , Attr.style "padding" "0.75rem"
+                            , Attr.style "border-radius" "0.25rem"
+                            , Attr.style "border" "1px solid #0ea5e9"
+                            , Attr.style "font-family" "monospace"
+                            , Attr.style "font-size" "1.25rem"
+                            , Attr.style "font-weight" "600"
+                            , Attr.style "text-align" "center"
+                            , Attr.style "letter-spacing" "0.25em"
+                            , Attr.style "color" "#0c4a6e"
+                            ]
+                            [ Html.text (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault (extractAccessCodeFromUrl (Maybe.withDefault "" model.hostname ++ createTeamUrl team.slug team.id "") |> Maybe.withDefault "????")) ]
+                        , Html.button
+                            [ Events.onClick (CopyToClipboard (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault (extractAccessCodeFromUrl (Maybe.withDefault "" model.hostname ++ createTeamUrl team.slug team.id "") |> Maybe.withDefault "????")))
+                            , Attr.style "background-color" "#0ea5e9"
+                            , Attr.style "color" "white"
+                            , Attr.style "border" "none"
+                            , Attr.style "border-radius" "0.25rem"
+                            , Attr.style "padding" "0.5rem"
+                            , Attr.style "font-size" "0.875rem"
+                            , Attr.style "cursor" "pointer"
+                            , Attr.style "transition" "background-color 0.2s"
+                            , Attr.style "min-width" "40px"
+                            , Attr.style "min-height" "40px"
+                            , Attr.style "display" "flex"
+                            , Attr.style "align-items" "center"
+                            , Attr.style "justify-content" "center"
+                            ]
+                            [ Html.text "📋" ]
+                        ]
+                    , Html.p
+                        [ Attr.style "color" "#0c4a6e"
+                        , Attr.style "font-size" "0.875rem"
+                        , Attr.style "margin-top" "0.5rem"
+                        , Attr.style "margin-bottom" "0"
+                        ]
+                        [ Html.text "Teile diesen Code mit deinen Teammitgliedern, damit sie Zugang erhalten." ]
+                    ]
                 , Html.div
                     [ Attr.style "text-align" "center"
                     , Attr.style "margin-bottom" "1rem"
@@ -2656,7 +2908,7 @@ viewShareModal model team =
                         , Attr.style "border-radius" "0.375rem"
                         , Attr.style "border" "1px solid #e2e8f0"
                         ]
-                        [ case QRCode.fromString (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id) of
+                        [ case QRCode.fromString (Maybe.withDefault "https://localhost:8000" model.hostname ++ createTeamUrl team.slug team.id (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")) of
                             Ok qrCode ->
                                 QRCode.toSvg
                                     [ Attr.style "width" "200px"

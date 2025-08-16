@@ -1,4 +1,4 @@
-module Utils exposing (createSlug, createTeamUrl, extractTeamIdFromUrl, generateMatchId, generateMemberId, generateRandomTeamId, getAllMatches, getCurrentSeason, getSeasonHalf, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByDate)
+module Utils exposing (createSlug, createTeamUrl, extractAccessCodeFromUrl, extractTeamIdFromUrl, generateMatchId, generateMemberId, generateRandomAccessCode, generateRandomTeamId, getAllMatches, getCurrentSeason, getSeasonHalf, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByDate)
 
 import Char
 import Dict exposing (Dict)
@@ -84,9 +84,9 @@ createSlug name =
 -- Combine slug and ID for team URL
 
 
-createTeamUrl : String -> String -> String
-createTeamUrl slug teamId =
-    "/team/" ++ slug ++ "-" ++ teamId
+createTeamUrl : String -> String -> String -> String
+createTeamUrl slug teamId accessCode =
+    "/team/" ++ slug ++ "-" ++ teamId ++ "?code=" ++ accessCode
 
 
 
@@ -112,6 +112,43 @@ extractTeamIdFromUrl url =
                     Nothing
 
         _ ->
+            Nothing
+
+
+
+-- Extract access code from URL query parameter
+-- URL format: /team/slug-teamid?code=1234
+
+
+extractAccessCodeFromUrl : String -> Maybe String
+extractAccessCodeFromUrl url =
+    let
+        queryStart =
+            String.indexes "?code=" url
+                |> List.head
+
+        codeStart =
+            Maybe.map (\start -> start + 6) queryStart
+    in
+    case codeStart of
+        Just start ->
+            let
+                codeEnd =
+                    String.indexes "&" (String.dropLeft start url)
+                        |> List.head
+                        |> Maybe.withDefault (String.length url - start)
+
+                accessCode =
+                    String.dropLeft start url
+                        |> String.left codeEnd
+            in
+            if String.length accessCode == 4 then
+                Just accessCode
+
+            else
+                Nothing
+
+        Nothing ->
             Nothing
 
 
@@ -229,3 +266,32 @@ isoToGermanDate isoDate =
 
         _ ->
             isoDate
+
+
+generateRandomAccessCode : Random.Seed -> ( String, Random.Seed )
+generateRandomAccessCode seed =
+    let
+        -- Generate random digits for access code
+        digitGenerator =
+            Random.map
+                (\n ->
+                    let
+                        digits =
+                            "0123456789"
+
+                        index =
+                            remainderBy (String.length digits) n
+                    in
+                    String.slice index (index + 1) digits
+                )
+                (Random.int 0 999999)
+
+        -- Generate 4 random digits
+        randomCodeGenerator =
+            Random.list 4 digitGenerator
+                |> Random.map (String.join "")
+
+        ( randomCode, newSeed ) =
+            Random.step randomCodeGenerator seed
+    in
+    ( randomCode, newSeed )
