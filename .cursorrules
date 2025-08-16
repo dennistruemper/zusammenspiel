@@ -4,6 +4,24 @@
 
 This is a Lamdera Elm project using Tailwind CSS for styling. Lamdera is a full-stack Elm platform that handles both frontend and backend development with real-time synchronization.
 
+## MCP Configuration
+
+To enable Playwright MCP integration, add this to your Cursor settings:
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp"],
+      "env": {
+        "NODE_ENV": "development"
+      }
+    }
+  }
+}
+```
+
 ## Language and Framework Guidelines
 
 ### Elm Code Style

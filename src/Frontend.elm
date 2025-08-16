@@ -7,6 +7,7 @@ import Dict
 import Html exposing (Html)
 import Html.Attributes as Attr
 import Html.Events as Events
+
 import Json.Decode
 import Lamdera
 import LocalStorage
@@ -15,6 +16,7 @@ import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
 import Utils exposing (createTeamUrl, extractAccessCodeFromUrl, extractTeamIdFromUrl, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByDate)
+import View.Dialog as Dialog
 
 
 type alias Model =
@@ -2745,7 +2747,10 @@ viewShareSection model team =
 viewShareModal : Model -> Team -> Html FrontendMsg
 viewShareModal model team =
     Html.div
-        [ Attr.style "position" "fixed"
+        [ Attr.attribute "role" "dialog"
+        , Attr.attribute "aria-modal" "true"
+        , Attr.attribute "aria-labelledby" "share-modal-title"
+        , Attr.style "position" "fixed"
         , Attr.style "top" "0"
         , Attr.style "left" "0"
         , Attr.style "width" "100%"
@@ -2778,7 +2783,8 @@ viewShareModal model team =
                     , Attr.style "align-items" "center"
                     ]
                     [ Html.h3
-                        [ Attr.style "font-size" "1.25rem"
+                        [ Attr.id "share-modal-title"
+                        , Attr.style "font-size" "1.25rem"
                         , Attr.style "font-weight" "600"
                         , Attr.style "color" "#1e293b"
                         , Attr.style "margin" "0"
