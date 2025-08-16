@@ -1,4 +1,7 @@
 import { expect, test } from "@playwright/test";
+import { HomePage } from "./pages/HomePage";
+import { TeamCreationPage } from "./pages/TeamCreationPage";
+import { TeamPage } from "./pages/TeamPage";
 
 test.describe("Core Team Creation Flow", () => {
   test.beforeEach(async ({ page }) => {
@@ -7,25 +10,24 @@ test.describe("Core Team Creation Flow", () => {
   });
 
   test("should create a team successfully", async ({ page }) => {
+    const homePage = new HomePage(page);
+    const teamCreationPage = new TeamCreationPage(page);
+    const teamPage = new TeamPage(page);
+
     // Navigate to create team page
-    await page.getByRole("link", { name: "Dein Team erstellen" }).click();
+    await homePage.navigateToCreateTeam();
 
     // Verify we're on the create team page
     await expect(page).toHaveURL("/create");
-    // Note: The heading might not be visible or might have different text
-    // We'll verify by checking the URL and form elements instead
 
     // Fill out the team creation form
-
-    await page.getByPlaceholder("Teamname eingeben").fill("Test Football Team");
-    await page.getByPlaceholder("Dein Name").fill("John Doe");
-    await page
-      .getByPlaceholder("Namen durch Komma getrennt")
-      .fill("Alice, Bob, Charlie");
-    await page.getByPlaceholder("z.B. 11 für Fußball").fill("11");
+    await teamCreationPage.fillTeamName("Test Football Team");
+    await teamCreationPage.fillCreatorName("John Doe");
+    await teamCreationPage.fillMembers(["Alice", "Bob", "Charlie"]);
+    await teamCreationPage.fillPlayersNeeded("11");
 
     // Submit the form
-    await page.getByRole("button", { name: "Team erstellen" }).click();
+    await teamCreationPage.submitForm();
 
     // Wait for team creation and redirect
     await expect(page).toHaveURL(/\/team\/test-football-team-/);
@@ -43,20 +45,19 @@ test.describe("Core Team Creation Flow", () => {
   test("should generate and display access code after team creation", async ({
     page,
   }) => {
+    const homePage = new HomePage(page);
+    const teamCreationPage = new TeamCreationPage(page);
+
     // Wait for page to be ready
-    await page.waitForLoadState("domcontentloaded");
+    await homePage.waitForPageLoad();
 
     // Create a team
-    await page.getByRole("link", { name: "Dein Team erstellen" }).click();
-    await page
-      .getByPlaceholder("Teamname eingeben")
-      .fill("Access Code Test Team");
-    await page.getByPlaceholder("Dein Name").fill("Jane Smith");
-    await page
-      .getByPlaceholder("Namen durch Komma getrennt")
-      .fill("David, Eve");
-    await page.getByPlaceholder("z.B. 11 für Fußball").fill("5");
-    await page.getByRole("button", { name: "Team erstellen" }).click();
+    await homePage.navigateToCreateTeam();
+    await teamCreationPage.fillTeamName("Access Code Test Team");
+    await teamCreationPage.fillCreatorName("Jane Smith");
+    await teamCreationPage.fillMembers(["David", "Eve"]);
+    await teamCreationPage.fillPlayersNeeded("5");
+    await teamCreationPage.submitForm();
 
     // Wait for team page to load
     await expect(page).toHaveURL(/\/team\/access-code-test-team-/);
@@ -73,60 +74,58 @@ test.describe("Core Team Creation Flow", () => {
   test("should show share modal with team link and access code", async ({
     page,
   }) => {
+    const homePage = new HomePage(page);
+    const teamCreationPage = new TeamCreationPage(page);
+    const teamPage = new TeamPage(page);
+
     // Create a team
-    await page.getByRole("link", { name: "Dein Team erstellen" }).click();
-    await page.getByPlaceholder("Teamname eingeben").fill("Share Test Team");
-    await page.getByPlaceholder("Dein Name").fill("Mike Johnson");
-    await page
-      .getByPlaceholder("Namen durch Komma getrennt")
-      .fill("Sarah, Tom");
-    await page.getByPlaceholder("z.B. 11 für Fußball").fill("7");
-    await page.getByRole("button", { name: "Team erstellen" }).click();
+    await homePage.navigateToCreateTeam();
+    await teamCreationPage.fillTeamName("Share Test Team");
+    await teamCreationPage.fillCreatorName("Mike Johnson");
+    await teamCreationPage.fillMembers(["Sarah", "Tom"]);
+    await teamCreationPage.fillPlayersNeeded("7");
+    await teamCreationPage.submitForm();
 
     // Wait for team page to load
     await expect(page).toHaveURL(/\/team\/share-test-team-/);
 
     // Click the share button
-    await page.getByRole("button", { name: "↗️Teilen" }).click();
+    await teamPage.openShareModal();
 
     // Verify share modal is visible
     await expect(page.getByText("Team teilen")).toBeVisible();
 
     // Verify team link is displayed in the modal
-    const teamLinkElement = page
-      .getByRole("dialog")
-      .locator("text=/team\\/share-test-team-/");
-    await expect(teamLinkElement).toBeVisible();
+    await expect(await teamPage.getTeamLinkInModal()).toBeVisible();
 
     // Verify access code is displayed prominently in the modal
-    const accessCodeElement = page
-      .getByRole("dialog")
-      .locator("text=/^\\d{4}$/");
-    await expect(accessCodeElement).toBeVisible();
+    await expect(await teamPage.getAccessCodeInModal()).toBeVisible();
 
     // Verify QR code is generated
     await expect(page.locator("svg")).toBeVisible();
   });
 
   test("should copy team link to clipboard", async ({ page, context }) => {
+    const homePage = new HomePage(page);
+    const teamCreationPage = new TeamCreationPage(page);
+    const teamPage = new TeamPage(page);
+
     // Create a team
-    await page.getByRole("link", { name: "Dein Team erstellen" }).click();
-    await page.getByPlaceholder("Teamname eingeben").fill("Copy Test Team");
-    await page.getByPlaceholder("Dein Name").fill("Lisa Brown");
-    await page.getByPlaceholder("Namen durch Komma getrennt").fill("Alex, Sam");
-    await page.getByPlaceholder("z.B. 11 für Fußball").fill("6");
-    await page.getByRole("button", { name: "Team erstellen" }).click();
+    await homePage.navigateToCreateTeam();
+    await teamCreationPage.fillTeamName("Copy Test Team");
+    await teamCreationPage.fillCreatorName("Lisa Brown");
+    await teamCreationPage.fillMembers(["Alex", "Sam"]);
+    await teamCreationPage.fillPlayersNeeded("6");
+    await teamCreationPage.submitForm();
 
     // Wait for team page to load
     await expect(page).toHaveURL(/\/team\/copy-test-team-/);
 
     // Open share modal
-    await page.getByRole("button", { name: "↗️Teilen" }).click();
+    await teamPage.openShareModal();
 
     // Click copy button for team link
-    const copyButton = page.getByRole("button", { name: "📋" }).first();
-    await expect(copyButton).toBeVisible();
-    await copyButton.click();
+    await teamPage.copyTeamLink();
 
     // Verify clipboard content for supported browsers (Chromium, Mobile Chrome)
     const browserName = page.context().browser()?.browserType().name();
@@ -139,28 +138,26 @@ test.describe("Core Team Creation Flow", () => {
   });
 
   test("should copy access code to clipboard", async ({ page, context }) => {
+    const homePage = new HomePage(page);
+    const teamCreationPage = new TeamCreationPage(page);
+    const teamPage = new TeamPage(page);
+
     // Create a team
-    await page.getByRole("link", { name: "Dein Team erstellen" }).click();
-    await page
-      .getByPlaceholder("Teamname eingeben")
-      .fill("Code Copy Test Team");
-    await page.getByPlaceholder("Dein Name").fill("Chris Wilson");
-    await page
-      .getByPlaceholder("Namen durch Komma getrennt")
-      .fill("Emma, Frank");
-    await page.getByPlaceholder("z.B. 11 für Fußball").fill("8");
-    await page.getByRole("button", { name: "Team erstellen" }).click();
+    await homePage.navigateToCreateTeam();
+    await teamCreationPage.fillTeamName("Code Copy Test Team");
+    await teamCreationPage.fillCreatorName("Chris Wilson");
+    await teamCreationPage.fillMembers(["Emma", "Frank"]);
+    await teamCreationPage.fillPlayersNeeded("8");
+    await teamCreationPage.submitForm();
 
     // Wait for team page to load
     await expect(page).toHaveURL(/\/team\/code-copy-test-team-/);
 
     // Open share modal
-    await page.getByRole("button", { name: "↗️Teilen" }).click();
+    await teamPage.openShareModal();
 
     // Click copy button for access code (second copy button)
-    const copyButton = page.getByRole("button", { name: "📋" }).nth(1);
-    await expect(copyButton).toBeVisible();
-    await copyButton.click();
+    await teamPage.copyAccessCode();
 
     // Verify clipboard content for supported browsers (Chromium, Mobile Chrome)
     const browserName = page.context().browser()?.browserType().name();
@@ -173,17 +170,16 @@ test.describe("Core Team Creation Flow", () => {
   });
 
   test("should access team with URL and access code", async ({ page }) => {
+    const homePage = new HomePage(page);
+    const teamCreationPage = new TeamCreationPage(page);
+
     // Create a team first
-    await page.getByRole("link", { name: "Dein Team erstellen" }).click();
-    await page
-      .getByPlaceholder("Teamname eingeben")
-      .fill("URL Access Test Team");
-    await page.getByPlaceholder("Dein Name").fill("Pat Davis");
-    await page
-      .getByPlaceholder("Namen durch Komma getrennt")
-      .fill("Jordan, Casey");
-    await page.getByPlaceholder("z.B. 11 für Fußball").fill("4");
-    await page.getByRole("button", { name: "Team erstellen" }).click();
+    await homePage.navigateToCreateTeam();
+    await teamCreationPage.fillTeamName("URL Access Test Team");
+    await teamCreationPage.fillCreatorName("Pat Davis");
+    await teamCreationPage.fillMembers(["Jordan", "Casey"]);
+    await teamCreationPage.fillPlayersNeeded("4");
+    await teamCreationPage.submitForm();
 
     // Wait for team page to load and get the URL
     await expect(page).toHaveURL(/\/team\/url-access-test-team-/);
@@ -216,35 +212,39 @@ test.describe("Core Team Creation Flow", () => {
   });
 
   test("should validate form inputs before submission", async ({ page }) => {
+    const homePage = new HomePage(page);
+    const teamCreationPage = new TeamCreationPage(page);
+
     // Wait for page to be ready
-    await page.waitForLoadState("domcontentloaded");
+    await homePage.waitForPageLoad();
 
     // Navigate to create team page
-    await page.getByRole("link", { name: "Dein Team erstellen" }).click();
+    await homePage.navigateToCreateTeam();
 
     // Try to submit empty form
-    await page.getByRole("button", { name: "Team erstellen" }).click();
+    await teamCreationPage.submitForm();
 
     // Should stay on create team page (form validation prevents submission)
     await expect(page).toHaveURL("/create");
-    // Note: The heading might not be visible or might have different text
-    // We'll verify by checking the URL instead
   });
 
   test("should handle team creation with minimum required fields", async ({
     page,
   }) => {
+    const homePage = new HomePage(page);
+    const teamCreationPage = new TeamCreationPage(page);
+
     // Navigate to create team page
-    await page.getByRole("link", { name: "Dein Team erstellen" }).click();
+    await homePage.navigateToCreateTeam();
 
     // Fill only required fields
-    await page.getByPlaceholder("Teamname eingeben").fill("Minimal Team");
-    await page.getByPlaceholder("Dein Name").fill("Minimal User");
-    await page.getByPlaceholder("z.B. 11 für Fußball").fill("3");
+    await teamCreationPage.fillTeamName("Minimal Team");
+    await teamCreationPage.fillCreatorName("Minimal User");
+    await teamCreationPage.fillPlayersNeeded("3");
     // Leave other member names empty
 
     // Submit the form
-    await page.getByRole("button", { name: "Team erstellen" }).click();
+    await teamCreationPage.submitForm();
 
     // Should create team successfully with just creator
     await expect(page).toHaveURL(/\/team\/minimal-team-/);

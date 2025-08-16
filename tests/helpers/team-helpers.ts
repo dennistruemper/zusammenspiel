@@ -1,68 +1,65 @@
 import { Page, expect } from "@playwright/test";
-
-export interface TeamCreationData {
-  name: string;
-  creatorName: string;
-  otherMemberNames: string;
-  playersNeeded: string;
-}
+import { HomePage } from "../pages/HomePage";
+import { TeamCreationPage } from "../pages/TeamCreationPage";
+import { TeamPage } from "../pages/TeamPage";
 
 export async function createTeam(
   page: Page,
-  teamData: TeamCreationData
-): Promise<string> {
+  teamName: string,
+  creatorName: string,
+  members: string[]
+): Promise<{ teamPage: TeamPage; accessCode: string }> {
+  const homePage = new HomePage(page);
+  const teamCreationPage = new TeamCreationPage(page);
+  const teamPage = new TeamPage(page);
+
+  // Navigate to home page
+  await page.goto("/");
+
+  // Wait for page to be ready
+  await homePage.waitForPageLoad();
+
   // Navigate to create team page
-  await page.getByRole("link", { name: "Mannschaft erstellen" }).click();
+  await homePage.navigateToCreateTeam();
 
-  // Verify we're on the create team page
-  await expect(page).toHaveURL("/create");
-  await expect(
-    page.getByRole("heading", { name: "Neue Mannschaft erstellen" })
-  ).toBeVisible();
-
-  // Fill out the team creation form
-  await page.getByLabel("Mannschaftsname").fill(teamData.name);
-  await page.getByLabel("Dein Name").fill(teamData.creatorName);
-  await page
-    .getByLabel("Weitere Teammitglieder (durch Komma getrennt)")
-    .fill(teamData.otherMemberNames);
-  await page
-    .getByLabel("Wie viele Spieler werden für ein Spiel benötigt?")
-    .fill(teamData.playersNeeded);
+  // Fill out the form
+  await teamCreationPage.fillTeamName(teamName);
+  await teamCreationPage.fillCreatorName(creatorName);
+  await teamCreationPage.fillMembers(members);
+  await teamCreationPage.fillPlayersNeeded("11"); // Default to 11 players
 
   // Submit the form
-  await page.getByRole("button", { name: "Mannschaft erstellen" }).click();
+  await teamCreationPage.submitForm();
 
-  // Wait for team creation and redirect
-  const expectedUrlPattern = new RegExp(
-    `/team/${teamData.name.toLowerCase().replace(/\s+/g, "-")}-`
+  // Wait for team page to load
+  await expect(page).toHaveURL(
+    new RegExp(`/team/${teamName.toLowerCase().replace(/\s+/g, "-")}-`)
   );
-  await expect(page).toHaveURL(expectedUrlPattern);
 
-  // Return the team URL for further testing
-  return page.url();
+  // Get access code from URL
+  const url = page.url();
+  const accessCodeMatch = url.match(/[?&]code=(\d{4})/);
+  const accessCode = accessCodeMatch ? accessCodeMatch[1] : "";
+
+  return { teamPage, accessCode };
 }
 
-export async function openShareModal(page: Page): Promise<void> {
-  // Click the share button
-  await page.getByRole("button", { name: "↗️ Teilen" }).click();
-
-  // Verify share modal is visible
-  await expect(page.getByRole("dialog")).toBeVisible();
-  await expect(page.getByText("Team teilen")).toBeVisible();
+export async function openShareModal(page: Page): Promise<TeamPage> {
+  const teamPage = new TeamPage(page);
+  await teamPage.openShareModal();
+  return teamPage;
 }
 
-export async function getAccessCodeFromPage(page: Page): Promise<string> {
-  // Look for the access code (4 digits) on the page
-  const accessCodeElement = page.locator("text=/\\d{4}/").first();
-  await expect(accessCodeElement).toBeVisible();
-
-  const accessCodeText = await accessCodeElement.textContent();
-  if (!accessCodeText || !accessCodeText.match(/^\d{4}$/)) {
-    throw new Error("Access code not found or invalid format");
+export async function copyToClipboard(
+  page: Page,
+  buttonIndex: number = 0
+): Promise<void> {
+  const teamPage = new TeamPage(page);
+  if (buttonIndex === 0) {
+    await teamPage.copyTeamLink();
+  } else {
+    await teamPage.copyAccessCode();
   }
-
-  return accessCodeText;
 }
 
 export async function verifyTeamMembers(
@@ -75,20 +72,6 @@ export async function verifyTeamMembers(
   }
 }
 
-export async function copyToClipboard(
-  page: Page,
-  copyButtonIndex: number = 0
-): Promise<string> {
-  // Click the copy button (first one by default)
-  await page.getByRole("button", { name: "📋" }).nth(copyButtonIndex).click();
-
-  // Get the clipboard content
-  const clipboardText = await page
-    .context()
-    .evaluate(() => navigator.clipboard.readText());
-  return clipboardText;
-}
-
 export async function verifyTeamPageLoaded(
   page: Page,
   teamName: string,
@@ -98,12 +81,3 @@ export async function verifyTeamPageLoaded(
   await expect(page.getByRole("heading", { name: teamName })).toBeVisible();
   await expect(page.getByText(creatorName)).toBeVisible();
 }
-
-export const sampleTeamData: TeamCreationData = {
-  name: "Test Team",
-  creatorName: "Test Creator",
-  otherMemberNames: "Member 1, Member 2, Member 3",
-  playersNeeded: "11",
-};
-
-
