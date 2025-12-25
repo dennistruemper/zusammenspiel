@@ -3,14 +3,18 @@ module Frontend exposing (..)
 import Basics exposing (min)
 import Browser exposing (UrlRequest(..))
 import Browser.Navigation as Nav
-import Dict
+import Dict exposing (Dict)
+import File exposing (File)
+import File.Select as Select
 import Html exposing (Html)
 import Html.Attributes as Attr
 import Html.Events as Events
+import IcsParser exposing (ParsedMatch, parseIcsToMatches)
 import Json.Decode
 import Lamdera
 import LocalStorage
 import QRCode
+import Task
 import Time
 import Types exposing (..)
 import Url
@@ -57,6 +61,13 @@ init url key =
             , changeMatchDateForm = ""
             , changeMatchDateMatchId = Nothing
             , showShareModal = False
+            , showImportIcsModal = False
+            , showAddMatchDropdown = False
+            , icsImportUrl = ""
+            , icsImportStatus = Nothing
+            , parsedIcsMatches = []
+            , allParsedIcsMatches = []
+            , icsImportSelectedMatches = Dict.empty
             , expandedMatches = []
             , pastMatchesShown = 10
             , pastMatchesExpanded = False
@@ -228,7 +239,7 @@ update msg model =
                 )
 
         ShowCreateMatchModal ->
-            ( { model | showCreateMatchModal = True }, Cmd.none )
+            ( { model | showCreateMatchModal = True, showAddMatchDropdown = False }, Cmd.none )
 
         HideCreateMatchModal ->
             ( { model | showCreateMatchModal = False }, Cmd.none )
@@ -397,6 +408,207 @@ update msg model =
 
         HideShareModal ->
             ( { model | showShareModal = False }, Cmd.none )
+
+        ShowImportIcsModal ->
+            ( { model | showImportIcsModal = True, icsImportStatus = Nothing, showAddMatchDropdown = False }, Cmd.none )
+
+        HideImportIcsModal ->
+            ( { model | showImportIcsModal = False, icsImportUrl = "", icsImportStatus = Nothing, parsedIcsMatches = [], allParsedIcsMatches = [], icsImportSelectedMatches = Dict.empty, showAddMatchDropdown = False }, Cmd.none )
+
+        ToggleAddMatchDropdown ->
+            ( { model | showAddMatchDropdown = not model.showAddMatchDropdown }, Cmd.none )
+
+        IcsImportMatchToggled index selected ->
+            let
+                updatedSelectedMatches =
+                    Dict.insert index selected model.icsImportSelectedMatches
+
+                selectedCount =
+                    model.allParsedIcsMatches
+                        |> List.indexedMap Tuple.pair
+                        |> List.filterMap
+                            (\( idx, _ ) ->
+                                if Dict.get idx updatedSelectedMatches |> Maybe.withDefault False then
+                                    Just idx
+
+                                else
+                                    Nothing
+                            )
+                        |> List.length
+
+                totalCount =
+                    List.length model.allParsedIcsMatches
+
+                statusMessage =
+                    if selectedCount == 0 then
+                        "✓ " ++ String.fromInt totalCount ++ " Spiele gefunden. Bitte wählen Sie mindestens ein Spiel zum Importieren aus."
+
+                    else
+                        "✓ " ++ String.fromInt totalCount ++ " Spiele gefunden. " ++ String.fromInt selectedCount ++ " zum Importieren ausgewählt."
+            in
+            ( { model
+                | icsImportSelectedMatches = updatedSelectedMatches
+                , icsImportStatus = Just statusMessage
+              }
+            , Cmd.none
+            )
+
+        IcsFileSelectButtonClicked ->
+            ( { model | icsImportStatus = Just "Lade Datei..." }
+            , Select.file [ "text/calendar", "text/plain" ] IcsFileSelected
+            )
+
+        IcsFileSelected file ->
+            ( { model | icsImportStatus = Just "Verarbeite ICS-Datei..." }
+            , Task.perform IcsFileContentRead (File.toString file)
+            )
+
+        IcsFileContentRead content ->
+            -- Content should be non-empty when file is read
+            if String.isEmpty content then
+                ( model, Cmd.none )
+
+            else
+                case model.currentTeam of
+                    Just team ->
+                        let
+                            -- Check if ICS content looks valid
+                            trimmedContent =
+                                String.trim content
+
+                            hasValidContent =
+                                String.contains "BEGIN:VCALENDAR" trimmedContent || String.contains "BEGIN:VEVENT" trimmedContent
+
+                            parsedMatches =
+                                if String.isEmpty trimmedContent then
+                                    []
+
+                                else
+                                    parseIcsToMatches team.name trimmedContent
+                        in
+                        if String.isEmpty trimmedContent then
+                            ( { model | icsImportStatus = Just "Fehler: Die ICS-Datei ist leer." }, Cmd.none )
+
+                        else if not hasValidContent then
+                            ( { model | icsImportStatus = Just "Fehler: Die ICS-Datei scheint kein gültiges Format zu haben. Bitte überprüfen Sie die Datei." }, Cmd.none )
+
+                        else if List.isEmpty parsedMatches then
+                            ( { model | icsImportStatus = Just ("Keine Spiele in der ICS-Datei gefunden. Team-Name: \"" ++ team.name ++ "\". Bitte überprüfen Sie, ob der Team-Name mit dem in der ICS-Datei übereinstimmt.") }, Cmd.none )
+
+                        else
+                            let
+                                -- Determine initial selection: future games checked, past games unchecked
+                                ( pastMatches, futureMatches ) =
+                                    case model.currentDate of
+                                        Just today ->
+                                            separatePastAndFutureMatches today parsedMatches
+
+                                        Nothing ->
+                                            ( [], parsedMatches )
+
+                                -- If no current date, assume all are future
+                                -- Build initial selection dict: future games = True, past games = False
+                                initialSelection =
+                                    parsedMatches
+                                        |> List.indexedMap
+                                            (\index match ->
+                                                let
+                                                    isFuture =
+                                                        List.member match futureMatches
+                                                in
+                                                ( index, isFuture )
+                                            )
+                                        |> Dict.fromList
+
+                                totalCount =
+                                    List.length parsedMatches
+
+                                futureCount =
+                                    List.length futureMatches
+
+                                pastCount =
+                                    List.length pastMatches
+
+                                selectedCount =
+                                    List.length futureMatches
+                            in
+                            ( { model
+                                | parsedIcsMatches = parsedMatches
+                                , allParsedIcsMatches = parsedMatches
+                                , icsImportSelectedMatches = initialSelection
+                                , icsImportStatus =
+                                    Just
+                                        ("✓ "
+                                            ++ String.fromInt totalCount
+                                            ++ " Spiele gefunden ("
+                                            ++ String.fromInt futureCount
+                                            ++ " zukünftig"
+                                            ++ (if pastCount > 0 then
+                                                    ", " ++ String.fromInt pastCount ++ " vergangen"
+
+                                                else
+                                                    ""
+                                               )
+                                            ++ "). "
+                                            ++ String.fromInt selectedCount
+                                            ++ " werden importiert (zukünftige Spiele sind standardmäßig ausgewählt)."
+                                        )
+                              }
+                            , Cmd.none
+                            )
+
+                    Nothing ->
+                        ( { model | icsImportStatus = Just "Fehler: Kein Team ausgewählt." }, Cmd.none )
+
+        ConfirmImportIcs teamId ->
+            case model.currentTeam of
+                Just team ->
+                    let
+                        -- Only import selected matches
+                        matchesToImport =
+                            model.allParsedIcsMatches
+                                |> List.indexedMap Tuple.pair
+                                |> List.filterMap
+                                    (\( index, match ) ->
+                                        if Dict.get index model.icsImportSelectedMatches |> Maybe.withDefault False then
+                                            Just match
+
+                                        else
+                                            Nothing
+                                    )
+
+                        -- If no current date, import all
+                        -- Create matches from filtered data
+                        createMatchCmds =
+                            List.map
+                                (\parsedMatch ->
+                                    let
+                                        matchForm =
+                                            { opponent = parsedMatch.opponent
+                                            , date = parsedMatch.date
+                                            , time = parsedMatch.time
+                                            , venue = parsedMatch.venue
+                                            , isHome = parsedMatch.isHome
+                                            }
+                                    in
+                                    Lamdera.sendToBackend
+                                        (CreateMatchRequest team.id matchForm (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault ""))
+                                )
+                                matchesToImport
+                    in
+                    ( { model
+                        | showImportIcsModal = False
+                        , icsImportUrl = ""
+                        , parsedIcsMatches = []
+                        , allParsedIcsMatches = []
+                        , icsImportSelectedMatches = Dict.empty
+                        , icsImportStatus = Just ("Erfolgreich " ++ String.fromInt (List.length matchesToImport) ++ " Spiele importiert!")
+                      }
+                    , Cmd.batch createMatchCmds
+                    )
+
+                Nothing ->
+                    ( model, Cmd.none )
 
         SubmitAccessCodeRequested teamId accessCode ->
             ( { model
@@ -911,12 +1123,193 @@ viewCreateTeamPage model =
         ]
 
 
+viewParsedMatchesTable : Dict Int Bool -> List ParsedMatch -> Html FrontendMsg
+viewParsedMatchesTable selectedMatches parsedMatches =
+    Html.div
+        [ Attr.style "overflow-x" "auto"
+        , Attr.style "border" "1px solid #e5e7eb"
+        , Attr.style "border-radius" "0.375rem"
+        , Events.stopPropagationOn "click" (Json.Decode.succeed ( NoOpFrontendMsg, True ))
+        ]
+        [ Html.table
+            [ Attr.style "width" "100%"
+            , Attr.style "border-collapse" "collapse"
+            , Attr.style "font-size" "0.875rem"
+            ]
+            [ Html.thead []
+                [ Html.tr
+                    [ Attr.style "background-color" "#f9fafb"
+                    , Attr.style "border-bottom" "2px solid #e5e7eb"
+                    ]
+                    [ Html.th
+                        [ Attr.style "padding" "0.75rem"
+                        , Attr.style "text-align" "center"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#374151"
+                        , Attr.style "width" "50px"
+                        ]
+                        [ Html.text "✓" ]
+                    , Html.th
+                        [ Attr.style "padding" "0.75rem"
+                        , Attr.style "text-align" "left"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#374151"
+                        ]
+                        [ Html.text "Datum" ]
+                    , Html.th
+                        [ Attr.style "padding" "0.75rem"
+                        , Attr.style "text-align" "left"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#374151"
+                        ]
+                        [ Html.text "Uhrzeit" ]
+                    , Html.th
+                        [ Attr.style "padding" "0.75rem"
+                        , Attr.style "text-align" "left"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#374151"
+                        ]
+                        [ Html.text "Gegner" ]
+                    , Html.th
+                        [ Attr.style "padding" "0.75rem"
+                        , Attr.style "text-align" "left"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#374151"
+                        ]
+                        [ Html.text "Spielort" ]
+                    , Html.th
+                        [ Attr.style "padding" "0.75rem"
+                        , Attr.style "text-align" "center"
+                        , Attr.style "font-weight" "600"
+                        , Attr.style "color" "#374151"
+                        ]
+                        [ Html.text "Heim/Auswärts" ]
+                    ]
+                ]
+            , Html.tbody []
+                (List.indexedMap
+                    (\index match ->
+                        let
+                            isSelected =
+                                Dict.get index selectedMatches |> Maybe.withDefault False
+                        in
+                        Html.tr
+                            [ Attr.style "border-bottom" "1px solid #e5e7eb"
+                            , Attr.style "background-color"
+                                (if remainderBy 2 index == 0 then
+                                    "white"
+
+                                 else
+                                    "#f9fafb"
+                                )
+                            ]
+                            [ Html.td
+                                [ Attr.style "padding" "0.75rem"
+                                , Attr.style "text-align" "center"
+                                ]
+                                [ Html.input
+                                    [ Attr.type_ "checkbox"
+                                    , Attr.checked isSelected
+                                    , Events.onClick (IcsImportMatchToggled index (not isSelected))
+                                    , Attr.style "cursor" "pointer"
+                                    ]
+                                    []
+                                ]
+                            , Html.td
+                                [ Attr.style "padding" "0.75rem"
+                                , Attr.style "color" "#374151"
+                                ]
+                                [ Html.text match.date ]
+                            , Html.td
+                                [ Attr.style "padding" "0.75rem"
+                                , Attr.style "color" "#374151"
+                                ]
+                                [ Html.text match.time ]
+                            , Html.td
+                                [ Attr.style "padding" "0.75rem"
+                                , Attr.style "color" "#374151"
+                                , Attr.style "font-weight" "500"
+                                ]
+                                [ Html.text match.opponent ]
+                            , Html.td
+                                [ Attr.style "padding" "0.75rem"
+                                , Attr.style "color" "#64748b"
+                                , Attr.style "max-width" "200px"
+                                , Attr.style "overflow" "hidden"
+                                , Attr.style "text-overflow" "ellipsis"
+                                , Attr.style "white-space" "nowrap"
+                                ]
+                                [ Html.text match.venue ]
+                            , Html.td
+                                [ Attr.style "padding" "0.75rem"
+                                , Attr.style "text-align" "center"
+                                ]
+                                [ Html.span
+                                    [ Attr.style "padding" "0.25rem 0.5rem"
+                                    , Attr.style "border-radius" "0.25rem"
+                                    , Attr.style "font-size" "0.75rem"
+                                    , Attr.style "font-weight" "500"
+                                    , Attr.style "background-color"
+                                        (if match.isHome then
+                                            "#dbeafe"
+
+                                         else
+                                            "#fef3c7"
+                                        )
+                                    , Attr.style "color"
+                                        (if match.isHome then
+                                            "#1e40af"
+
+                                         else
+                                            "#92400e"
+                                        )
+                                    ]
+                                    [ Html.text
+                                        (if match.isHome then
+                                            "Heim"
+
+                                         else
+                                            "Auswärts"
+                                        )
+                                    ]
+                                ]
+                            ]
+                    )
+                    parsedMatches
+                )
+            ]
+        ]
+
+
 viewTeamPage : Model -> Html FrontendMsg
 viewTeamPage model =
     case model.currentTeam of
         Just team ->
             Html.div []
-                [ Html.div
+                [ Html.node "style"
+                    []
+                    [ Html.text """
+                        .availability-controls-desktop {
+                            display: flex;
+                            flex-direction: column;
+                            align-items: flex-end;
+                            gap: 0.5rem;
+                        }
+                        .availability-controls-mobile {
+                            display: none;
+                            justify-content: center;
+                            width: 100%;
+                        }
+                        @media (max-width: 768px) {
+                            .availability-controls-desktop {
+                                display: none;
+                            }
+                            .availability-controls-mobile {
+                                display: flex;
+                            }
+                        }
+                    """ ]
+                , Html.div
                     [ Attr.style "display" "flex"
                     , Attr.style "justify-content" "space-between"
                     , Attr.style "align-items" "center"
@@ -1014,6 +1407,11 @@ viewTeamPage model =
                     Html.text ""
                 , if model.showShareModal then
                     viewShareModal model team
+
+                  else
+                    Html.text ""
+                , if model.showImportIcsModal then
+                    viewImportIcsModal model team
 
                   else
                     Html.text ""
@@ -1407,25 +1805,91 @@ viewMatchesSection model team =
                 , Attr.style "min-width" "0"
                 ]
                 [ Html.text "Spiele" ]
-            , Html.button
-                [ Events.onClick ShowCreateMatchModal
-                , Attr.style "background-color" "#3b82f6"
-                , Attr.style "color" "white"
-                , Attr.style "padding" "0.75rem 1rem"
-                , Attr.style "border" "none"
-                , Attr.style "border-radius" "0.5rem"
-                , Attr.style "font-size" "0.875rem"
-                , Attr.style "font-weight" "500"
-                , Attr.style "cursor" "pointer"
-                , Attr.style "transition" "background-color 0.2s"
-                , Attr.style "min-height" "44px"
+            , Html.div
+                [ Attr.style "position" "relative"
                 , Attr.style "flex-shrink" "0"
-                , Attr.style "display" "flex"
-                , Attr.style "align-items" "center"
-                , Attr.style "gap" "0.5rem"
                 ]
-                [ Html.text "+"
-                , Html.text "Spiel hinzufügen"
+                [ Html.button
+                    [ Events.onClick ToggleAddMatchDropdown
+                    , Attr.style "background-color" "#3b82f6"
+                    , Attr.style "color" "white"
+                    , Attr.style "padding" "0.75rem 1rem"
+                    , Attr.style "border" "none"
+                    , Attr.style "border-radius" "0.5rem"
+                    , Attr.style "font-size" "0.875rem"
+                    , Attr.style "font-weight" "500"
+                    , Attr.style "cursor" "pointer"
+                    , Attr.style "transition" "background-color 0.2s"
+                    , Attr.style "min-height" "44px"
+                    , Attr.style "display" "flex"
+                    , Attr.style "align-items" "center"
+                    , Attr.style "gap" "0.5rem"
+                    ]
+                    [ Html.text "➕"
+                    , Html.text "Spiel hinzufügen"
+                    , Html.span
+                        [ Attr.style "margin-left" "0.25rem"
+                        , Attr.style "font-size" "0.75rem"
+                        ]
+                        [ Html.text
+                            (if model.showAddMatchDropdown then
+                                "▲"
+
+                             else
+                                "▼"
+                            )
+                        ]
+                    ]
+                , if model.showAddMatchDropdown then
+                    Html.div
+                        [ Attr.style "position" "absolute"
+                        , Attr.style "top" "100%"
+                        , Attr.style "right" "0"
+                        , Attr.style "margin-top" "0.5rem"
+                        , Attr.style "background-color" "white"
+                        , Attr.style "border" "1px solid #e5e7eb"
+                        , Attr.style "border-radius" "0.5rem"
+                        , Attr.style "box-shadow" "0 4px 6px rgba(0,0,0,0.1)"
+                        , Attr.style "min-width" "200px"
+                        , Attr.style "z-index" "100"
+                        ]
+                        [ Html.button
+                            [ Events.onClick ShowCreateMatchModal
+                            , Attr.style "width" "100%"
+                            , Attr.style "padding" "0.75rem 1rem"
+                            , Attr.style "border" "none"
+                            , Attr.style "background-color" "white"
+                            , Attr.style "color" "#374151"
+                            , Attr.style "text-align" "left"
+                            , Attr.style "font-size" "0.875rem"
+                            , Attr.style "cursor" "pointer"
+                            , Attr.style "transition" "background-color 0.2s"
+                            , Attr.style "border-radius" "0.5rem 0.5rem 0 0"
+                            ]
+                            [ Html.text "Spiel hinzufügen" ]
+                        , Html.div
+                            [ Attr.style "height" "1px"
+                            , Attr.style "background-color" "#e5e7eb"
+                            ]
+                            []
+                        , Html.button
+                            [ Events.onClick ShowImportIcsModal
+                            , Attr.style "width" "100%"
+                            , Attr.style "padding" "0.75rem 1rem"
+                            , Attr.style "border" "none"
+                            , Attr.style "background-color" "white"
+                            , Attr.style "color" "#374151"
+                            , Attr.style "text-align" "left"
+                            , Attr.style "font-size" "0.875rem"
+                            , Attr.style "cursor" "pointer"
+                            , Attr.style "transition" "background-color 0.2s"
+                            , Attr.style "border-radius" "0 0 0.5rem 0.5rem"
+                            ]
+                            [ Html.text "TT-Live ICS importieren" ]
+                        ]
+
+                  else
+                    Html.text ""
                 ]
             ]
         , if List.isEmpty model.matches then
@@ -1443,7 +1907,31 @@ viewMatchesSection model team =
 
           else
             Html.div []
-                [ -- Past Matches Section
+                [ -- Future Matches Section (shown first - more important)
+                  if List.isEmpty futureMatches then
+                    Html.text ""
+
+                  else
+                    Html.div
+                        [ Attr.style "margin-bottom" "2rem" ]
+                        [ Html.h4
+                            [ Attr.style "font-size" "1rem"
+                            , Attr.style "font-weight" "600"
+                            , Attr.style "color" "#6b7280"
+                            , Attr.style "margin" "0 0 1rem 0"
+                            ]
+                            [ Html.text "Kommende Spiele" ]
+                        , Html.div
+                            [ Attr.style "width" "100%"
+                            ]
+                            (List.indexedMap
+                                (\index match ->
+                                    viewMatchItem model team match (index == List.length sortedFutureMatches - 1)
+                                )
+                                sortedFutureMatches
+                            )
+                        ]
+                , -- Past Matches Section (shown second - less important)
                   if List.isEmpty pastMatches then
                     Html.text ""
 
@@ -1516,29 +2004,6 @@ viewMatchesSection model team =
                           else
                             Html.text ""
                         ]
-                , -- Future Matches Section
-                  if List.isEmpty futureMatches then
-                    Html.text ""
-
-                  else
-                    Html.div []
-                        [ Html.h4
-                            [ Attr.style "font-size" "1rem"
-                            , Attr.style "font-weight" "600"
-                            , Attr.style "color" "#6b7280"
-                            , Attr.style "margin" "0 0 1rem 0"
-                            ]
-                            [ Html.text "Kommende Spiele" ]
-                        , Html.div
-                            [ Attr.style "width" "100%"
-                            ]
-                            (List.indexedMap
-                                (\index match ->
-                                    viewMatchItem model team match (index == List.length sortedFutureMatches - 1)
-                                )
-                                sortedFutureMatches
-                            )
-                        ]
                 ]
         ]
 
@@ -1592,6 +2057,8 @@ viewMatchItem model team match isLast =
                     [ Html.div
                         [ Attr.style "flex" "1"
                         , Attr.style "min-width" "0"
+                        , Attr.style "width" "100%"
+                        , Attr.style "max-width" "100%"
                         ]
                         [ Html.h4
                             [ Attr.style "font-weight" "600"
@@ -1631,6 +2098,11 @@ viewMatchItem model team match isLast =
                             [ Attr.style "color" "#64748b"
                             , Attr.style "margin" "0 0 0.5rem 0"
                             , Attr.style "font-size" "0.875rem"
+                            , Attr.style "line-height" "1.5"
+                            , Attr.style "overflow-wrap" "break-word"
+                            , Attr.style "word-break" "normal"
+                            , Attr.style "width" "100%"
+                            , Attr.style "max-width" "100%"
                             ]
                             [ Html.text match.venue ]
                         ]
@@ -1670,7 +2142,11 @@ viewMatchItem model team match isLast =
                             ]
                         , case model.activeMemberId of
                             Just activeMemberId ->
-                                viewAvailabilityControls activeMemberId match.id (getMemberAvailabilityForMatch activeMemberId match.id model.availability)
+                                Html.div
+                                    [ Attr.class "availability-controls-desktop"
+                                    ]
+                                    [ viewAvailabilityControls activeMemberId match.id (getMemberAvailabilityForMatch activeMemberId match.id model.availability)
+                                    ]
 
                             Nothing ->
                                 Html.text ""
@@ -1679,33 +2155,49 @@ viewMatchItem model team match isLast =
                 , Html.div
                     [ Attr.style "margin-top" "0.5rem"
                     , Attr.style "display" "flex"
-                    , Attr.style "justify-content" "space-between"
-                    , Attr.style "align-items" "center"
+                    , Attr.style "flex-direction" "column"
+                    , Attr.style "gap" "0.75rem"
                     ]
-                    [ viewAvailabilityOverview match.id model.members model.availability
-                    , Html.button
-                        [ Events.onClick (ToggleMatchDetails match.id)
-                        , Attr.style "background-color" "#f8fafc"
-                        , Attr.style "border" "1px solid #e2e8f0"
-                        , Attr.style "border-radius" "0.375rem"
-                        , Attr.style "padding" "0.5rem"
-                        , Attr.style "font-size" "1rem"
-                        , Attr.style "color" "#64748b"
-                        , Attr.style "cursor" "pointer"
-                        , Attr.style "min-height" "44px"
-                        , Attr.style "min-width" "44px"
-                        , Attr.style "transition" "background-color 0.2s"
-                        , Attr.style "display" "flex"
-                        , Attr.style "align-items" "center"
-                        , Attr.style "justify-content" "center"
-                        ]
-                        [ Html.text
-                            (if isExpanded then
-                                "👁️"
+                    [ case model.activeMemberId of
+                        Just activeMemberId ->
+                            Html.div
+                                [ Attr.class "availability-controls-mobile"
+                                ]
+                                [ viewAvailabilityControls activeMemberId match.id (getMemberAvailabilityForMatch activeMemberId match.id model.availability)
+                                ]
 
-                             else
-                                "👥"
-                            )
+                        Nothing ->
+                            Html.text ""
+                    , Html.div
+                        [ Attr.style "display" "flex"
+                        , Attr.style "justify-content" "space-between"
+                        , Attr.style "align-items" "center"
+                        ]
+                        [ viewAvailabilityOverview match.id model.members model.availability
+                        , Html.button
+                            [ Events.onClick (ToggleMatchDetails match.id)
+                            , Attr.style "background-color" "#f8fafc"
+                            , Attr.style "border" "1px solid #e2e8f0"
+                            , Attr.style "border-radius" "0.375rem"
+                            , Attr.style "padding" "0.5rem"
+                            , Attr.style "font-size" "1rem"
+                            , Attr.style "color" "#64748b"
+                            , Attr.style "cursor" "pointer"
+                            , Attr.style "min-height" "44px"
+                            , Attr.style "min-width" "44px"
+                            , Attr.style "transition" "background-color 0.2s"
+                            , Attr.style "display" "flex"
+                            , Attr.style "align-items" "center"
+                            , Attr.style "justify-content" "center"
+                            ]
+                            [ Html.text
+                                (if isExpanded then
+                                    "👁️"
+
+                                 else
+                                    "👥"
+                                )
+                            ]
                         ]
                     ]
                 ]
@@ -2488,8 +2980,8 @@ viewAvailabilityControls memberId matchId currentAvailability =
     Html.div
         [ Attr.style "display" "flex"
         , Attr.style "gap" "0.5rem"
-        , Attr.style "margin-top" "0.5rem"
-        , Attr.style "justify-content" "flex-end"
+        , Attr.style "justify-content" "center"
+        , Attr.style "width" "100%"
         ]
         [ viewAvailabilityButton memberId matchId Available "✓" (currentAvailability == Just Available)
         , viewAvailabilityButton memberId matchId Maybe "?" (currentAvailability == Just Maybe)
@@ -2983,6 +3475,204 @@ viewShareModal model team =
                     , Attr.style "margin" "0"
                     ]
                     [ Html.text "💡 Tipp: Speichere diese Seite als Lesezeichen für einfachen Zugang." ]
+                ]
+            ]
+        ]
+
+
+viewImportIcsModal : Model -> Team -> Html FrontendMsg
+viewImportIcsModal model team =
+    Html.div
+        [ Attr.attribute "role" "dialog"
+        , Attr.attribute "aria-modal" "true"
+        , Attr.attribute "aria-labelledby" "import-ics-modal-title"
+        , Attr.style "position" "fixed"
+        , Attr.style "top" "0"
+        , Attr.style "left" "0"
+        , Attr.style "width" "100%"
+        , Attr.style "height" "100%"
+        , Attr.style "background-color" "rgba(0,0,0,0.5)"
+        , Attr.style "display" "flex"
+        , Attr.style "justify-content" "center"
+        , Attr.style "align-items" "center"
+        , Attr.style "z-index" "1000"
+        , Events.onClick HideImportIcsModal
+        ]
+        [ Html.div
+            [ Attr.style "background-color" "white"
+            , Attr.style "border-radius" "0.75rem"
+            , Attr.style "box-shadow" "0 10px 25px rgba(0,0,0,0.25)"
+            , Attr.style "max-width" "600px"
+            , Attr.style "width" "95%"
+            , Attr.style "margin" "1rem"
+            , Attr.style "max-height" "90vh"
+            , Attr.style "overflow-y" "auto"
+            , Events.stopPropagationOn "click" (Json.Decode.succeed ( NoOpFrontendMsg, True ))
+            ]
+            [ Html.div
+                [ Attr.style "padding" "1.5rem"
+                , Attr.style "border-bottom" "1px solid #e5e7eb"
+                , Attr.style "display" "flex"
+                , Attr.style "justify-content" "space-between"
+                , Attr.style "align-items" "center"
+                ]
+                [ Html.h3
+                    [ Attr.id "import-ics-modal-title"
+                    , Attr.style "font-size" "1.25rem"
+                    , Attr.style "font-weight" "600"
+                    , Attr.style "color" "#1e293b"
+                    , Attr.style "margin" "0"
+                    ]
+                    [ Html.text "ICS-Datei importieren" ]
+                , Html.button
+                    [ Events.onClick HideImportIcsModal
+                    , Attr.style "background" "none"
+                    , Attr.style "border" "none"
+                    , Attr.style "font-size" "1.5rem"
+                    , Attr.style "cursor" "pointer"
+                    , Attr.style "color" "#6b7280"
+                    ]
+                    [ Html.text "×" ]
+                ]
+            , Html.div
+                [ Attr.style "padding" "1.5rem" ]
+                [ Html.p
+                    [ Attr.style "color" "#64748b"
+                    , Attr.style "margin-bottom" "1rem"
+                    , Attr.style "font-size" "0.875rem"
+                    ]
+                    [ Html.text "Wähle eine ICS-Datei aus, um alle Spiele automatisch zu importieren. Die ICS-Datei sollte im iCalendar-Format vorliegen." ]
+                , Html.div
+                    [ Attr.style "margin-bottom" "1rem" ]
+                    [ Html.label
+                        [ Attr.style "display" "block"
+                        , Attr.style "font-weight" "500"
+                        , Attr.style "color" "#374151"
+                        , Attr.style "margin-bottom" "0.5rem"
+                        ]
+                        [ Html.text "ICS-Datei *" ]
+                    , Html.button
+                        [ Events.onClick IcsFileSelectButtonClicked
+                        , Attr.style "width" "100%"
+                        , Attr.style "padding" "0.75rem"
+                        , Attr.style "border" "2px dashed #d1d5db"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "background-color" "#f9fafb"
+                        , Attr.style "color" "#374151"
+                        , Attr.style "font-size" "1rem"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "display" "flex"
+                        , Attr.style "align-items" "center"
+                        , Attr.style "justify-content" "center"
+                        , Attr.style "gap" "0.5rem"
+                        , Attr.style "transition" "all 0.2s"
+                        ]
+                        [ Html.text "📁 Datei auswählen" ]
+                    ]
+                , case model.icsImportStatus of
+                    Just status ->
+                        Html.div
+                            [ Attr.style "padding" "0.75rem"
+                            , Attr.style "border-radius" "0.375rem"
+                            , Attr.style "margin-bottom" "1rem"
+                            , Attr.style "background-color"
+                                (if String.startsWith "Erfolgreich" status then
+                                    "#d1fae5"
+
+                                 else if String.startsWith "Fehler" status then
+                                    "#fee2e2"
+
+                                 else
+                                    "#fef3c7"
+                                )
+                            , Attr.style "color"
+                                (if String.startsWith "Erfolgreich" status then
+                                    "#065f46"
+
+                                 else if String.startsWith "Fehler" status then
+                                    "#991b1b"
+
+                                 else
+                                    "#92400e"
+                                )
+                            , Attr.style "font-size" "0.875rem"
+                            ]
+                            [ Html.text status ]
+
+                    Nothing ->
+                        Html.text ""
+                , if List.isEmpty model.parsedIcsMatches then
+                    Html.text ""
+
+                  else
+                    Html.div
+                        [ Attr.style "margin-top" "1.5rem"
+                        , Attr.style "margin-bottom" "1rem"
+                        ]
+                        [ Html.div
+                            [ Attr.style "display" "flex"
+                            , Attr.style "justify-content" "space-between"
+                            , Attr.style "align-items" "center"
+                            , Attr.style "margin-bottom" "1rem"
+                            ]
+                            [ Html.h4
+                                [ Attr.style "font-size" "1rem"
+                                , Attr.style "font-weight" "600"
+                                , Attr.style "color" "#1e293b"
+                                , Attr.style "margin" "0"
+                                ]
+                                [ Html.text ("Gefundene Spiele (" ++ String.fromInt (List.length model.allParsedIcsMatches) ++ ")") ]
+                            ]
+                        , viewParsedMatchesTable model.icsImportSelectedMatches model.allParsedIcsMatches
+                        ]
+                , Html.div
+                    [ Attr.style "display" "flex"
+                    , Attr.style "gap" "0.75rem"
+                    , Attr.style "justify-content" "flex-end"
+                    ]
+                    [ Html.button
+                        [ Events.onClick HideImportIcsModal
+                        , Attr.style "padding" "0.75rem 1.5rem"
+                        , Attr.style "border" "1px solid #d1d5db"
+                        , Attr.style "border-radius" "0.375rem"
+                        , Attr.style "background-color" "white"
+                        , Attr.style "color" "#374151"
+                        , Attr.style "font-weight" "500"
+                        , Attr.style "cursor" "pointer"
+                        , Attr.style "font-size" "0.875rem"
+                        ]
+                        [ Html.text "Abbrechen" ]
+                    , let
+                        selectedCount =
+                            model.allParsedIcsMatches
+                                |> List.indexedMap Tuple.pair
+                                |> List.filterMap
+                                    (\( index, _ ) ->
+                                        if Dict.get index model.icsImportSelectedMatches |> Maybe.withDefault False then
+                                            Just index
+
+                                        else
+                                            Nothing
+                                    )
+                                |> List.length
+                      in
+                      if selectedCount == 0 then
+                        Html.text ""
+
+                      else
+                        Html.button
+                            [ Events.onClick (ConfirmImportIcs team.id)
+                            , Attr.style "padding" "0.75rem 1.5rem"
+                            , Attr.style "border" "none"
+                            , Attr.style "border-radius" "0.375rem"
+                            , Attr.style "background-color" "#10b981"
+                            , Attr.style "color" "white"
+                            , Attr.style "font-weight" "500"
+                            , Attr.style "cursor" "pointer"
+                            , Attr.style "font-size" "0.875rem"
+                            ]
+                            [ Html.text ("Importieren (" ++ String.fromInt selectedCount ++ ")") ]
+                    ]
                 ]
             ]
         ]

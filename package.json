@@ -5,6 +5,7 @@
   "main": "elm-pkg-js-includes.js",
   "scripts": {
     "test": "playwright test",
+    "test:elm": "elm-test --compiler `which lamdera`",
     "test:headed": "playwright test --headed",
     "test:debug": "playwright test --debug",
     "test:ui": "playwright test --ui",

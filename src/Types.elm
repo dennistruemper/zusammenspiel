@@ -3,6 +3,8 @@ module Types exposing (..)
 import Browser exposing (UrlRequest)
 import Browser.Navigation exposing (Key)
 import Dict exposing (Dict)
+import File exposing (File)
+import IcsParser exposing (ParsedMatch)
 import Lamdera exposing (SessionId)
 import Random
 import Url exposing (Url)
@@ -109,6 +111,13 @@ type alias FrontendModel =
     , changeMatchDateForm : String -- New date for the match being edited
     , changeMatchDateMatchId : Maybe String -- ID of the match being edited
     , showShareModal : Bool
+    , showImportIcsModal : Bool
+    , showAddMatchDropdown : Bool -- Whether the "Add Match" dropdown menu is open
+    , icsImportUrl : String -- URL for ICS file import
+    , icsImportStatus : Maybe String -- Status message for ICS import (error or success)
+    , parsedIcsMatches : List ParsedMatch -- Parsed matches waiting for confirmation
+    , allParsedIcsMatches : List ParsedMatch -- All parsed matches before filtering
+    , icsImportSelectedMatches : Dict Int Bool -- Index -> selected state for import (Int is index in allParsedIcsMatches)
     , expandedMatches : List String -- Match IDs that are expanded
     , pastMatchesShown : Int -- Number of past matches currently shown
     , pastMatchesExpanded : Bool -- Whether past matches section is expanded
@@ -202,6 +211,14 @@ type FrontendMsg
     | GetAccessCode TeamId -- Request access code from localStorage
     | AccessCodeLoaded TeamId String -- Access code loaded from localStorage (teamId, accessCode)
     | CopyToClipboard String -- Copy text to clipboard
+    | ShowImportIcsModal
+    | HideImportIcsModal
+    | ToggleAddMatchDropdown -- Toggle the add match dropdown menu
+    | IcsFileSelectButtonClicked -- User clicked file select button
+    | IcsFileSelected File -- File was selected (File type from elm/file)
+    | IcsFileContentRead String -- File content was read
+    | IcsImportMatchToggled Int Bool -- Toggle selection for a specific match (index, selected)
+    | ConfirmImportIcs TeamId -- Confirm and import the parsed matches
     | NoOpFrontendMsg
 
 
