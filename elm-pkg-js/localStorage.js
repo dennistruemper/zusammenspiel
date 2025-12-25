@@ -54,6 +54,14 @@ exports.init = async function (app) {
       // Get current hostname with protocol
       const currentUrl = window.location.protocol + "//" + window.location.host;
       app.ports.fromJS.send("HOSTNAME:" + currentUrl);
+    } else if (message === "GET_CURRENT_DATE") {
+      // Get current date in German format (dd.mm.yyyy)
+      const now = new Date();
+      const day = String(now.getDate()).padStart(2, "0");
+      const month = String(now.getMonth() + 1).padStart(2, "0"); // getMonth() returns 0-11
+      const year = now.getFullYear();
+      const germanDate = day + "." + month + "." + year;
+      app.ports.fromJS.send("CURRENT_DATE:" + germanDate);
     }
   });
 };

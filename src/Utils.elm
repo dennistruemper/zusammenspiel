@@ -223,15 +223,9 @@ sortMatchesByDate matches =
 -- Separate past and future matches
 
 
-separatePastAndFutureMatches : List { a | date : String } -> ( List { a | date : String }, List { a | date : String } )
-separatePastAndFutureMatches matches =
+separatePastAndFutureMatches : String -> List { a | date : String } -> ( List { a | date : String }, List { a | date : String } )
+separatePastAndFutureMatches today matches =
     let
-        -- For now, use a hardcoded date. In a real app, you'd get this from Time.now
-        -- This separates matches into past (before today) and future (today and after)
-        today =
-            "13.08.2025"
-
-        -- Current date for testing (German format)
         -- Convert German date format (dd.mm.yyyy) to sortable format (yyyy-mm-dd)
         convertToSortable : String -> String
         convertToSortable dateStr =

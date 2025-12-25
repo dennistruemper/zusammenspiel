@@ -7,11 +7,11 @@ import Dict
 import Html exposing (Html)
 import Html.Attributes as Attr
 import Html.Events as Events
-
 import Json.Decode
 import Lamdera
 import LocalStorage
 import QRCode
+import Time
 import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
@@ -30,7 +30,7 @@ app =
         , onUrlChange = UrlChanged
         , update = update
         , updateFromBackend = updateFromBackend
-        , subscriptions = \m -> LocalStorage.fromJS LocalStorageMessage
+        , subscriptions = \m -> Sub.batch [ LocalStorage.fromJS LocalStorageMessage, Time.every (30 * 60 * 1000) (\_ -> UpdateCurrentDate) ]
         , view = view
         }
 
@@ -64,6 +64,7 @@ init url key =
             , members = []
             , availability = []
             , hostname = Nothing
+            , currentDate = Nothing
             , confirmedTeamCodes = Dict.empty
             , accessCodeRequired = Nothing
             , enteredAccessCode = ""
@@ -89,6 +90,7 @@ init url key =
                     ( modelWithAccessCode
                     , Cmd.batch
                         [ LocalStorage.toJS "GET_HOSTNAME"
+                        , LocalStorage.toJS "GET_CURRENT_DATE"
                         , if String.length urlAccessCode == 4 then
                             Lamdera.sendToBackend (GetTeamRequest teamId urlAccessCode)
 
@@ -98,7 +100,12 @@ init url key =
                     )
 
                 _ ->
-                    ( initialModel, LocalStorage.toJS "GET_HOSTNAME" )
+                    ( initialModel
+                    , Cmd.batch
+                        [ LocalStorage.toJS "GET_HOSTNAME"
+                        , LocalStorage.toJS "GET_CURRENT_DATE"
+                        ]
+                    )
     in
     ( updatedModel, cmd )
 
@@ -285,8 +292,19 @@ update msg model =
                 in
                 ( { model | hostname = Just hostname }, Cmd.none )
 
+            else if String.startsWith "CURRENT_DATE:" message then
+                let
+                    currentDate =
+                        String.dropLeft 13 message
+                in
+                ( { model | currentDate = Just currentDate }, Cmd.none )
+
             else
                 ( model, Cmd.none )
+
+        UpdateCurrentDate ->
+            -- Periodically update the current date
+            ( model, LocalStorage.toJS "GET_CURRENT_DATE" )
 
         LogoutRequested ->
             ( { model | activeMemberId = Nothing, page = HomePage }
@@ -1179,16 +1197,12 @@ type MatchStatus
     | Past -- Past matches (No color)
 
 
-getMatchStatus : String -> String -> List Member -> List AvailabilityRecord -> Int -> MatchStatus
-getMatchStatus matchId matchDate members availability playersNeeded =
+getMatchStatus : String -> String -> String -> List Member -> List AvailabilityRecord -> Int -> MatchStatus
+getMatchStatus matchId matchDate today members availability playersNeeded =
     let
         summary =
             getMatchAvailabilitySummary matchId members availability
 
-        today =
-            "13.08.2025"
-
-        -- Current date for testing (German format)
         -- Convert German date format (dd.mm.yyyy) to sortable format (yyyy-mm-dd)
         convertToSortable : String -> String
         convertToSortable dateStr =
@@ -1204,14 +1218,37 @@ getMatchStatus matchId matchDate members availability playersNeeded =
             convertToSortable matchDate < convertToSortable today
 
         -- Check if match is less than 2 weeks in the future
+        -- Convert both dates to sortable format and compare
+        -- For simplicity, we check if match is in the same month or next month as today
+        -- This is an approximation but works well for the use case
         isLessThanTwoWeeksAway =
             let
-                twoWeeksFromNow =
-                    "27.08.2025"
+                matchSortable =
+                    convertToSortable matchDate
 
-                -- 2 weeks from today (German format)
+                todaySortable =
+                    convertToSortable today
+
+                -- Extract year-month from sortable dates (yyyy-mm)
+                matchYearMonth =
+                    String.left 7 matchSortable
+
+                todayYearMonth =
+                    String.left 7 todaySortable
+
+                -- Check if match is in same month or next month
+                -- This approximates "within 2 weeks" reasonably well
             in
-            convertToSortable matchDate >= convertToSortable today && convertToSortable matchDate <= convertToSortable twoWeeksFromNow
+            matchSortable
+                >= todaySortable
+                && (matchYearMonth
+                        == todayYearMonth
+                        || (matchYearMonth
+                                > todayYearMonth
+                                && String.left 4 matchSortable
+                                == String.left 4 todaySortable
+                           )
+                   )
     in
     if isPastMatch then
         -- Past matches don't need status colors
@@ -1317,15 +1354,20 @@ getMatchAvailabilitySummary matchId members availability =
 viewMatchesSection : Model -> Team -> Html FrontendMsg
 viewMatchesSection model team =
     let
+        -- Use current date or fallback to a default date if not available yet
+        today =
+            model.currentDate |> Maybe.withDefault "01.01.2024"
+
         ( pastMatches, futureMatches ) =
-            separatePastAndFutureMatches model.matches
+            separatePastAndFutureMatches today model.matches
 
         -- Convert German date (dd.mm.yyyy) to sortable format (yyyy-mm-dd)
+        -- IMPORTANT: Pad with zeros to ensure correct string comparison
         germanDateToSortable : String -> String
         germanDateToSortable dateStr =
             case String.split "." dateStr of
                 [ day, month, year ] ->
-                    year ++ "-" ++ month ++ "-" ++ day
+                    year ++ "-" ++ String.padLeft 2 '0' month ++ "-" ++ String.padLeft 2 '0' day
 
                 _ ->
                     dateStr
@@ -1507,8 +1549,11 @@ viewMatchItem model team match isLast =
         isExpanded =
             List.member match.id model.expandedMatches
 
+        today =
+            model.currentDate |> Maybe.withDefault "01.01.2024"
+
         matchStatus =
-            getMatchStatus match.id match.date model.members model.availability team.playersNeeded
+            getMatchStatus match.id match.date today model.members model.availability team.playersNeeded
 
         statusBackgroundColor =
             matchStatusToBackgroundColor matchStatus

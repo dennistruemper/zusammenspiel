@@ -113,6 +113,7 @@ type alias FrontendModel =
     , pastMatchesShown : Int -- Number of past matches currently shown
     , pastMatchesExpanded : Bool -- Whether past matches section is expanded
     , hostname : Maybe String -- Current hostname from JavaScript
+    , currentDate : Maybe String -- Current date in German format (dd.mm.yyyy)
     , confirmedTeamCodes : Dict TeamId String -- teamId -> accessCode
     , accessCodeRequired : Maybe TeamId
     , enteredAccessCode : String -- Track the currently entered access code
@@ -184,6 +185,7 @@ type FrontendMsg
     | ShowCreateMemberInModal
     | HideCreateMemberInModal
     | LocalStorageMessage String
+    | UpdateCurrentDate -- Periodic update to refresh current date
     | LogoutRequested
     | SetAvailability String String Availability
     | ToggleMatchDetails String
