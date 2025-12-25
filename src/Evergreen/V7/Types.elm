@@ -146,13 +146,6 @@ type alias BackendModel =
     }
 
 
-type PWAMsg
-    = DeepLinkTeam String String
-    | RequestNotificationPermission
-    | SendNotification String String
-    | ShareTeam String String String
-
-
 type FrontendMsg
     = UrlClicked Browser.UrlRequest
     | UrlChanged Url.Url
@@ -172,6 +165,7 @@ type FrontendMsg
     | ShowCreateMemberInModal
     | HideCreateMemberInModal
     | LocalStorageMessage String
+    | UpdateCurrentDate
     | LogoutRequested
     | SetAvailability String String Availability
     | ToggleMatchDetails String
@@ -189,7 +183,6 @@ type FrontendMsg
     | AccessCodeLoaded TeamId String
     | CopyToClipboard String
     | NoOpFrontendMsg
-    | PWAMessage PWAMsg
 
 
 type ToBackend
