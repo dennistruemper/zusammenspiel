@@ -2413,7 +2413,7 @@ viewDatePredictionSection model match =
             ]
             [ Html.text
                 (if hasPredictions then
-                    "📅 Weitere Vorhersage hinzufügen"
+                    "📅 Weiteren Vorschlag hinzufügen"
 
                  else
                     "📅 Verlegung vorschlagen"
