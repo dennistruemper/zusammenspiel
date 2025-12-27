@@ -1813,8 +1813,8 @@ type MatchStatus
     | Past -- Past matches (No color)
 
 
-getMatchStatus : String -> String -> String -> List Member -> List AvailabilityRecord -> Int -> MatchStatus
-getMatchStatus matchId matchDate today members availability playersNeeded =
+getMatchStatus : String -> String -> String -> List Member -> List AvailabilityRecord -> Int -> Dict String (Dict String (Dict String DatePrediction)) -> MatchStatus
+getMatchStatus matchId matchDate today members availability playersNeeded datePredictions =
     let
         summary =
             getMatchAvailabilitySummary matchId members availability
@@ -1865,10 +1865,22 @@ getMatchStatus matchId matchDate today members availability playersNeeded =
                                 == String.left 4 todaySortable
                            )
                    )
+
+        -- Check if there are any predictions for this match
+        hasPredictions =
+            datePredictions
+                |> Dict.get matchId
+                |> Maybe.map (not << Dict.isEmpty)
+                |> Maybe.withDefault False
     in
     if isPastMatch then
         -- Past matches don't need status colors
         Past
+
+    else if hasPredictions then
+        -- If there are predictions, the match needs attention (should be changed)
+        -- Show as Possible (yellow) even if availability is good
+        Possible
 
     else if summary.available >= playersNeeded then
         Ready
@@ -2293,11 +2305,10 @@ getPredictionStatus datePredictions members playersNeeded =
     if summary.available >= playersNeeded then
         Ready
 
-    else if summary.available + summary.maybe >= playersNeeded then
-        Possible
-
     else
-        NotReady
+        -- Predictions always show as Possible (yellow) when not ready, never NotReady (red)
+        -- This indicates attention is needed, not that something is bad
+        Possible
 
 
 getMemberPredictionForDate : String -> String -> Dict String DatePrediction -> Maybe DatePrediction
@@ -2491,7 +2502,7 @@ viewPredictedDateCard model match predictedDate datePredictions =
                         , Attr.style "color" "#1e293b"
                         , Attr.style "margin-bottom" "0.25rem"
                         ]
-                        [ Html.text (isoToGermanDate predictedDate) ]
+                        [ Html.text ("Vorschlag: " ++ isoToGermanDate predictedDate) ]
                     , Html.div
                         [ Attr.style "font-size" "0.75rem"
                         , Attr.style "color" "#64748b"
@@ -2793,7 +2804,7 @@ viewMatchItem model team match isLast =
             model.currentDate |> Maybe.withDefault "01.01.2024"
 
         matchStatus =
-            getMatchStatus match.id match.date today model.members model.availability team.playersNeeded
+            getMatchStatus match.id match.date today model.members model.availability team.playersNeeded model.datePredictions
 
         statusBackgroundColor =
             matchStatusToBackgroundColor matchStatus
@@ -2853,7 +2864,23 @@ viewMatchItem model team match isLast =
                             , Attr.style "margin" "0 0 0.5rem 0"
                             , Attr.style "font-size" "0.875rem"
                             ]
-                            [ Html.text (isoToGermanDate match.date ++ " um " ++ match.time) ]
+                            [ Html.text
+                                ((case match.originalDate of
+                                    Just origDate ->
+                                        if origDate /= match.date then
+                                            "Geplanter Termin: "
+
+                                        else
+                                            ""
+
+                                    Nothing ->
+                                        ""
+                                 )
+                                    ++ match.date
+                                    ++ " um "
+                                    ++ match.time
+                                )
+                            ]
                         , viewDatePredictionSection model match
                         , Html.p
                             [ Attr.style "color" "#64748b"
