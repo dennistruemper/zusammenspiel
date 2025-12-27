@@ -51,6 +51,7 @@ type alias Match =
     , season : Season
     , seasonHalf : SeasonHalf
     , matchday : Int -- Spieltag number within the half
+    , originalDate : Maybe String -- Original date before predictions (Nothing if never changed)
     }
 
 
@@ -74,6 +75,13 @@ type alias AvailabilityRecord =
     }
 
 
+type alias DatePrediction =
+    { predictedDate : String -- German format: "25.12.2024"
+    , memberId : String
+    , availability : Availability
+    }
+
+
 type alias SeasonData =
     { hinrunde : List Match
     , rückrunde : List Match
@@ -85,6 +93,7 @@ type alias TeamData =
     , seasons : Dict Season SeasonData -- season -> matches organized by half
     , members : Dict String Member -- memberId -> Member
     , availability : Dict String (Dict String Availability) -- memberId -> (matchId -> Availability)
+    , datePredictions : Dict String (Dict String (Dict String DatePrediction)) -- matchId -> (predictedDate -> (memberId -> DatePrediction))
     }
 
 
@@ -119,6 +128,7 @@ type alias FrontendModel =
     , allParsedIcsMatches : List ParsedMatch -- All parsed matches before filtering
     , icsImportSelectedMatches : Dict Int Bool -- Index -> selected state for import (Int is index in allParsedIcsMatches)
     , expandedMatches : List String -- Match IDs that are expanded
+    , expandedPredictions : List ( String, String ) -- (matchId, predictedDate) pairs that are expanded
     , pastMatchesShown : Int -- Number of past matches currently shown
     , pastMatchesExpanded : Bool -- Whether past matches section is expanded
     , hostname : Maybe String -- Current hostname from JavaScript
@@ -126,6 +136,10 @@ type alias FrontendModel =
     , confirmedTeamCodes : Dict TeamId String -- teamId -> accessCode
     , accessCodeRequired : Maybe TeamId
     , enteredAccessCode : String -- Track the currently entered access code
+    , datePredictions : Dict String (Dict String (Dict String DatePrediction)) -- matchId -> (predictedDate -> (memberId -> DatePrediction))
+    , showDatePredictionModal : Bool
+    , datePredictionMatchId : Maybe String -- ID of match for which we're adding/editing predictions
+    , datePredictionForm : String -- Date input for new prediction
     }
 
 
@@ -198,6 +212,7 @@ type FrontendMsg
     | LogoutRequested
     | SetAvailability String String Availability
     | ToggleMatchDetails String
+    | TogglePredictionDetails String String -- matchId, predictedDate
     | LoadMorePastMatches
     | TogglePastMatchesSection
     | ShowChangeMatchDateModal String
@@ -219,6 +234,13 @@ type FrontendMsg
     | IcsFileContentRead String -- File content was read
     | IcsImportMatchToggled Int Bool -- Toggle selection for a specific match (index, selected)
     | ConfirmImportIcs TeamId -- Confirm and import the parsed matches
+    | ShowDatePredictionModal String -- matchId
+    | HideDatePredictionModal
+    | DatePredictionFormUpdated String -- new date string
+    | AddDatePrediction String String -- matchId, predictedDate
+    | RemoveDatePrediction String -- matchId
+    | UpdatePredictionAvailability String String Availability -- matchId, predictedDate, availability
+    | ChoosePredictedDate String String -- matchId, chosenDate
     | NoOpFrontendMsg
 
 
@@ -230,6 +252,10 @@ type ToBackend
     | CreateMemberRequest TeamId CreateMemberForm String -- teamId, form, accessCode
     | UpdateAvailabilityRequest String String Availability String -- memberId, matchId, availability, accessCode
     | ChangeMatchDateRequest String String String String -- matchId, newDate, teamId, accessCode
+    | AddDatePredictionRequest String String String String -- matchId, predictedDate, memberId, accessCode
+    | UpdatePredictionAvailabilityRequest String String String Availability String -- matchId, predictedDate, memberId, availability, accessCode
+    | RemoveDatePredictionRequest String String String -- matchId, memberId, accessCode
+    | ChoosePredictedDateRequest String String String String -- matchId, chosenDate, teamId, accessCode
     | NoOpToBackend
 
 
@@ -239,11 +265,16 @@ type BackendMsg
 
 type ToFrontend
     = TeamCreated Team String String -- Team, creator member ID, and access code
-    | TeamLoaded Team (List Match) (List Member) (List AvailabilityRecord)
+    | TeamLoaded Team (List Match) (List Member) (List AvailabilityRecord) (Dict String (Dict String (Dict String DatePrediction))) -- Team, matches, members, availability, datePredictions
     | TeamNotFound
     | AccessCodeRequired TeamId -- Request access code for team access
     | MatchCreated Match
     | MemberCreated Member
     | AvailabilityUpdated AvailabilityRecord
     | MatchDateChanged String String -- matchId, newDate
+    | DatePredictionAdded DatePrediction String -- DatePrediction, matchId
+    | DatePredictionUpdated DatePrediction String -- DatePrediction, matchId
+    | DatePredictionRemoved String String -- matchId, memberId
+    | PredictionsCleared String -- matchId
+    | MatchOriginalDateSet String String -- matchId, originalDate
     | NoOpToFrontend

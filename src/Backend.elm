@@ -25,7 +25,7 @@ init : ( Model, Cmd BackendMsg )
 init =
     ( { teams = Dict.empty
       , nextId = 1
-      , randomSeed = Random.initialSeed 42 -- Will be updated with real time
+      , randomSeed = Random.initialSeed 42
       , teamSessions = Dict.empty
       }
     , Cmd.none
@@ -34,6 +34,37 @@ init =
 
 
 -- HELPER FUNCTIONS
+
+
+updateMatchInSeasons matchId updateFn seasons =
+    Dict.map
+        (\season seasonData ->
+            let
+                updatedHinrunde =
+                    List.map
+                        (\match ->
+                            if match.id == matchId then
+                                updateFn match
+
+                            else
+                                match
+                        )
+                        seasonData.hinrunde
+
+                updatedRückrunde =
+                    List.map
+                        (\match ->
+                            if match.id == matchId then
+                                updateFn match
+
+                            else
+                                match
+                        )
+                        seasonData.rückrunde
+            in
+            { seasonData | hinrunde = updatedHinrunde, rückrunde = updatedRückrunde }
+        )
+        seasons
 
 
 sendToTeamSessions : TeamId -> ToFrontend -> Model -> Cmd BackendMsg
@@ -119,6 +150,7 @@ updateFromFrontend sessionId clientId msg model =
                     , seasons = Dict.empty
                     , members = allMembers
                     , availability = Dict.empty
+                    , datePredictions = Dict.empty
                     }
 
                 updatedModel =
@@ -179,9 +211,13 @@ updateFromFrontend sessionId clientId msg model =
                                                         }
                                                     )
                                         )
+
+                            -- Include date predictions
+                            teamPredictions =
+                                teamData.datePredictions
                         in
                         ( updatedModel
-                        , sendToFrontend sessionId (TeamLoaded teamData.team teamMatches teamMembers teamAvailability)
+                        , sendToFrontend sessionId (TeamLoaded teamData.team teamMatches teamMembers teamAvailability teamPredictions)
                         )
 
                     else
@@ -234,6 +270,7 @@ updateFromFrontend sessionId clientId msg model =
                                 , season = season
                                 , seasonHalf = seasonHalf
                                 , matchday = 1 -- TODO: Calculate proper matchday
+                                , originalDate = Nothing
                                 }
 
                             -- Add match to appropriate season/half
@@ -375,37 +412,6 @@ updateFromFrontend sessionId clientId msg model =
                     -- Validate access code
                     if accessCode == teamData.team.accessCode then
                         let
-                            -- Find the match in the team's seasons and update it
-                            updateMatchInSeasons seasons =
-                                Dict.map
-                                    (\season seasonData ->
-                                        let
-                                            updatedHinrunde =
-                                                List.map
-                                                    (\match ->
-                                                        if match.id == matchId then
-                                                            { match | date = newDate }
-
-                                                        else
-                                                            match
-                                                    )
-                                                    seasonData.hinrunde
-
-                                            updatedRückrunde =
-                                                List.map
-                                                    (\match ->
-                                                        if match.id == matchId then
-                                                            { match | date = newDate }
-
-                                                        else
-                                                            match
-                                                    )
-                                                    seasonData.rückrunde
-                                        in
-                                        { seasonData | hinrunde = updatedHinrunde, rückrunde = updatedRückrunde }
-                                    )
-                                    seasons
-
                             -- Remove all availability records for this match
                             clearMatchAvailability availability =
                                 Dict.map
@@ -416,7 +422,7 @@ updateFromFrontend sessionId clientId msg model =
 
                             updatedTeamData =
                                 { teamData
-                                    | seasons = updateMatchInSeasons teamData.seasons
+                                    | seasons = updateMatchInSeasons matchId (\match -> { match | date = newDate }) teamData.seasons
                                     , availability = clearMatchAvailability teamData.availability
                                 }
 
@@ -479,9 +485,13 @@ updateFromFrontend sessionId clientId msg model =
                                                         }
                                                     )
                                         )
+
+                            -- Include date predictions
+                            teamPredictions =
+                                teamData.datePredictions
                         in
                         ( updatedModel
-                        , sendToFrontend sessionId (TeamLoaded teamData.team teamMatches teamMembers teamAvailability)
+                        , sendToFrontend sessionId (TeamLoaded teamData.team teamMatches teamMembers teamAvailability teamPredictions)
                         )
 
                     else
@@ -493,6 +503,351 @@ updateFromFrontend sessionId clientId msg model =
                     ( model
                     , sendToFrontend sessionId TeamNotFound
                     )
+
+        AddDatePredictionRequest matchId predictedDate memberId accessCode ->
+            -- Find the team that contains this match
+            let
+                findTeamWithMatch : ( TeamId, TeamData ) -> Bool
+                findTeamWithMatch ( _, teamData ) =
+                    teamData.seasons
+                        |> Dict.values
+                        |> List.concatMap (\seasonData -> seasonData.hinrunde ++ seasonData.rückrunde)
+                        |> List.any (\match -> match.id == matchId)
+            in
+            case model.teams |> Dict.toList |> List.filter findTeamWithMatch |> List.head of
+                Just ( teamId, teamData ) ->
+                    -- Validate access code
+                    if accessCode == teamData.team.accessCode then
+                        let
+                            -- Get the match to check if we need to set originalDate
+                            allMatches =
+                                teamData.seasons
+                                    |> Dict.values
+                                    |> List.concatMap (\seasonData -> seasonData.hinrunde ++ seasonData.rückrunde)
+
+                            currentMatch =
+                                allMatches
+                                    |> List.filter (\match -> match.id == matchId)
+                                    |> List.head
+
+                            -- Set originalDate if not already set
+                            ( updatedMatch, shouldSetOriginalDate ) =
+                                case currentMatch of
+                                    Just match ->
+                                        if match.originalDate == Nothing then
+                                            ( { match | originalDate = Just match.date }, True )
+
+                                        else
+                                            ( match, False )
+
+                                    Nothing ->
+                                        -- Match not found, can't update
+                                        ( Maybe.withDefault
+                                            { id = matchId
+                                            , opponent = ""
+                                            , date = ""
+                                            , time = ""
+                                            , isHome = False
+                                            , venue = ""
+                                            , season = ""
+                                            , seasonHalf = Hinrunde
+                                            , matchday = 0
+                                            , originalDate = Nothing
+                                            }
+                                            currentMatch
+                                        , False
+                                        )
+
+                            -- Get predictions for this match
+                            matchPredictions =
+                                teamData.datePredictions
+                                    |> Dict.get matchId
+                                    |> Maybe.withDefault Dict.empty
+
+                            -- Get predictions for this specific date (if any exist)
+                            datePredictions =
+                                matchPredictions
+                                    |> Dict.get predictedDate
+                                    |> Maybe.withDefault Dict.empty
+
+                            -- Check if this member already has a prediction for this date
+                            existingMemberPrediction =
+                                Dict.get memberId datePredictions
+
+                            -- Create or update this member's prediction for this date
+                            newPrediction =
+                                case existingMemberPrediction of
+                                    Just existing ->
+                                        -- Member already predicted this date, keep existing availability
+                                        existing
+
+                                    Nothing ->
+                                        -- New prediction for this member/date
+                                        { predictedDate = predictedDate
+                                        , memberId = memberId
+                                        , availability = Maybe
+                                        }
+
+                            -- Update the date's predictions dict with this member's prediction
+                            updatedDatePredictions =
+                                Dict.insert memberId newPrediction datePredictions
+
+                            -- Update match predictions dict
+                            updatedMatchPredictions =
+                                Dict.insert predictedDate updatedDatePredictions matchPredictions
+
+                            updatedPredictions =
+                                Dict.insert matchId updatedMatchPredictions teamData.datePredictions
+
+                            -- Update match in seasons if needed
+                            updatedSeasons =
+                                if shouldSetOriginalDate then
+                                    updateMatchInSeasons matchId (\_ -> updatedMatch) teamData.seasons
+
+                                else
+                                    teamData.seasons
+
+                            updatedTeamData =
+                                { teamData
+                                    | datePredictions = updatedPredictions
+                                    , seasons = updatedSeasons
+                                }
+
+                            updatedModel =
+                                { model | teams = Dict.insert teamId updatedTeamData model.teams }
+
+                            -- Send original date set message if we set it
+                            originalDateCmd =
+                                if shouldSetOriginalDate then
+                                    sendToTeamSessions teamId (MatchOriginalDateSet matchId updatedMatch.date) updatedModel
+
+                                else
+                                    Cmd.none
+                        in
+                        ( updatedModel
+                        , Cmd.batch
+                            [ sendToTeamSessions teamId (DatePredictionAdded newPrediction matchId) updatedModel
+                            , originalDateCmd
+                            ]
+                        )
+
+                    else
+                        ( model, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        UpdatePredictionAvailabilityRequest matchId predictedDate memberId availability accessCode ->
+            -- Find the team that contains this match
+            let
+                findTeamWithMatch : ( TeamId, TeamData ) -> Bool
+                findTeamWithMatch ( _, teamData ) =
+                    teamData.seasons
+                        |> Dict.values
+                        |> List.concatMap (\seasonData -> seasonData.hinrunde ++ seasonData.rückrunde)
+                        |> List.any (\match -> match.id == matchId)
+            in
+            case model.teams |> Dict.toList |> List.filter findTeamWithMatch |> List.head of
+                Just ( teamId, teamData ) ->
+                    -- Validate access code
+                    if accessCode == teamData.team.accessCode then
+                        let
+                            -- Get predictions for this match
+                            matchPredictions =
+                                teamData.datePredictions
+                                    |> Dict.get matchId
+                                    |> Maybe.withDefault Dict.empty
+
+                            -- Get predictions for this specific date
+                            datePredictions =
+                                matchPredictions
+                                    |> Dict.get predictedDate
+                                    |> Maybe.withDefault Dict.empty
+
+                            -- Get current prediction for this member/date
+                            currentPrediction =
+                                Dict.get memberId datePredictions
+
+                            -- Update prediction availability
+                            updatedPrediction =
+                                case currentPrediction of
+                                    Just existing ->
+                                        { existing | availability = availability }
+
+                                    Nothing ->
+                                        { predictedDate = predictedDate
+                                        , memberId = memberId
+                                        , availability = availability
+                                        }
+
+                            -- Update the date's predictions dict
+                            updatedDatePredictions =
+                                Dict.insert memberId updatedPrediction datePredictions
+
+                            -- Update match predictions dict
+                            updatedMatchPredictions =
+                                Dict.insert predictedDate updatedDatePredictions matchPredictions
+
+                            updatedPredictions =
+                                Dict.insert matchId updatedMatchPredictions teamData.datePredictions
+
+                            updatedTeamData =
+                                { teamData | datePredictions = updatedPredictions }
+
+                            updatedModel =
+                                { model | teams = Dict.insert teamId updatedTeamData model.teams }
+                        in
+                        ( updatedModel
+                        , sendToTeamSessions teamId (DatePredictionUpdated updatedPrediction matchId) updatedModel
+                        )
+
+                    else
+                        ( model, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        RemoveDatePredictionRequest matchId memberId accessCode ->
+            -- Find the team that contains this match
+            let
+                findTeamWithMatch : ( TeamId, TeamData ) -> Bool
+                findTeamWithMatch ( _, teamData ) =
+                    teamData.seasons
+                        |> Dict.values
+                        |> List.concatMap (\seasonData -> seasonData.hinrunde ++ seasonData.rückrunde)
+                        |> List.any (\match -> match.id == matchId)
+            in
+            case model.teams |> Dict.toList |> List.filter findTeamWithMatch |> List.head of
+                Just ( teamId, teamData ) ->
+                    -- Validate access code
+                    if accessCode == teamData.team.accessCode then
+                        let
+                            -- Remove all predictions for this member/match combination
+                            -- (remove member from all date predictions)
+                            matchPredictions =
+                                teamData.datePredictions
+                                    |> Dict.get matchId
+                                    |> Maybe.withDefault Dict.empty
+
+                            -- Remove member from all date predictions
+                            updatedMatchPredictions =
+                                matchPredictions
+                                    |> Dict.map (\date datePredictions -> Dict.remove memberId datePredictions)
+                                    |> Dict.filter (\_ datePredictions -> not (Dict.isEmpty datePredictions))
+
+                            updatedPredictions =
+                                if Dict.isEmpty updatedMatchPredictions then
+                                    Dict.remove matchId teamData.datePredictions
+
+                                else
+                                    Dict.insert matchId updatedMatchPredictions teamData.datePredictions
+
+                            updatedTeamData =
+                                { teamData | datePredictions = updatedPredictions }
+
+                            updatedModel =
+                                { model | teams = Dict.insert teamId updatedTeamData model.teams }
+                        in
+                        ( updatedModel
+                        , sendToTeamSessions teamId (DatePredictionRemoved matchId memberId) updatedModel
+                        )
+
+                    else
+                        ( model, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        ChoosePredictedDateRequest matchId chosenDate teamId accessCode ->
+            case Dict.get teamId model.teams of
+                Just teamData ->
+                    -- Validate access code
+                    if accessCode == teamData.team.accessCode then
+                        let
+                            -- Get predictions for this match
+                            matchPredictions =
+                                teamData.datePredictions
+                                    |> Dict.get matchId
+                                    |> Maybe.withDefault Dict.empty
+
+                            -- Get predictions for the chosen date
+                            predictionsForChosenDate =
+                                matchPredictions
+                                    |> Dict.get chosenDate
+                                    |> Maybe.withDefault Dict.empty
+                                    |> Dict.values
+
+                            -- First, remove all existing availability for this match
+                            -- (to clear any old availability from the original date)
+                            clearedAvailability =
+                                teamData.availability
+                                    |> Dict.map (\memberId memberAvailabilities -> Dict.remove matchId memberAvailabilities)
+                                    |> Dict.filter (\_ memberAvailabilities -> not (Dict.isEmpty memberAvailabilities))
+
+                            -- Migrate availability from predictions to main availability
+                            migrateAvailability currentAvailability =
+                                List.foldl
+                                    (\prediction acc ->
+                                        let
+                                            memberAvailability =
+                                                Dict.get prediction.memberId acc
+                                                    |> Maybe.withDefault Dict.empty
+
+                                            updatedMemberAvailability =
+                                                Dict.insert matchId prediction.availability memberAvailability
+                                        in
+                                        Dict.insert prediction.memberId updatedMemberAvailability acc
+                                    )
+                                    currentAvailability
+                                    predictionsForChosenDate
+
+                            -- Update match date
+                            -- Clear all predictions for this match
+                            updatedPredictions =
+                                Dict.remove matchId teamData.datePredictions
+
+                            updatedAvailability =
+                                migrateAvailability clearedAvailability
+
+                            updatedTeamData =
+                                { teamData
+                                    | seasons = updateMatchInSeasons matchId (\match -> { match | date = chosenDate }) teamData.seasons
+                                    , datePredictions = updatedPredictions
+                                    , availability = updatedAvailability
+                                }
+
+                            updatedModel =
+                                { model | teams = Dict.insert teamId updatedTeamData model.teams }
+
+                            -- Send availability updates for each migrated record
+                            availabilityUpdateCmds =
+                                predictionsForChosenDate
+                                    |> List.map
+                                        (\prediction ->
+                                            sendToTeamSessions teamId
+                                                (AvailabilityUpdated
+                                                    { memberId = prediction.memberId
+                                                    , matchId = matchId
+                                                    , availability = prediction.availability
+                                                    }
+                                                )
+                                                updatedModel
+                                        )
+                                    |> Cmd.batch
+                        in
+                        ( updatedModel
+                        , Cmd.batch
+                            [ sendToTeamSessions teamId (MatchDateChanged matchId chosenDate) updatedModel
+                            , sendToTeamSessions teamId (PredictionsCleared matchId) updatedModel
+                            , availabilityUpdateCmds
+                            ]
+                        )
+
+                    else
+                        ( model, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
 
         NoOpToBackend ->
             ( model, Cmd.none )

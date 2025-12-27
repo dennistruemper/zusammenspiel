@@ -69,6 +69,7 @@ init url key =
             , allParsedIcsMatches = []
             , icsImportSelectedMatches = Dict.empty
             , expandedMatches = []
+            , expandedPredictions = []
             , pastMatchesShown = 10
             , pastMatchesExpanded = False
             , matches = []
@@ -79,6 +80,10 @@ init url key =
             , confirmedTeamCodes = Dict.empty
             , accessCodeRequired = Nothing
             , enteredAccessCode = ""
+            , datePredictions = Dict.empty
+            , showDatePredictionModal = False
+            , datePredictionMatchId = Nothing
+            , datePredictionForm = ""
             }
 
         ( updatedModel, cmd ) =
@@ -359,6 +364,20 @@ update msg model =
                         matchId :: model.expandedMatches
             in
             ( { model | expandedMatches = updatedExpandedMatches }, Cmd.none )
+
+        TogglePredictionDetails matchId predictedDate ->
+            let
+                predictionKey =
+                    ( matchId, predictedDate )
+
+                updatedExpandedPredictions =
+                    if List.member predictionKey model.expandedPredictions then
+                        List.filter ((/=) predictionKey) model.expandedPredictions
+
+                    else
+                        predictionKey :: model.expandedPredictions
+            in
+            ( { model | expandedPredictions = updatedExpandedPredictions }, Cmd.none )
 
         LoadMorePastMatches ->
             ( { model | pastMatchesShown = model.pastMatchesShown + 10 }, Cmd.none )
@@ -653,6 +672,93 @@ update msg model =
             else
                 ( { model | accessCodeRequired = Just teamId }, Cmd.none )
 
+        ShowDatePredictionModal matchId ->
+            let
+                currentMatch =
+                    model.matches
+                        |> List.filter (\match -> match.id == matchId)
+                        |> List.head
+            in
+            ( { model
+                | showDatePredictionModal = True
+                , datePredictionMatchId = Just matchId
+                , datePredictionForm = Maybe.map .date currentMatch |> Maybe.withDefault ""
+              }
+            , Cmd.none
+            )
+
+        HideDatePredictionModal ->
+            ( { model
+                | showDatePredictionModal = False
+                , datePredictionMatchId = Nothing
+                , datePredictionForm = ""
+              }
+            , Cmd.none
+            )
+
+        DatePredictionFormUpdated newDate ->
+            ( { model | datePredictionForm = newDate }, Cmd.none )
+
+        AddDatePrediction matchId predictedDate ->
+            case ( model.currentTeam, model.activeMemberId ) of
+                ( Just team, Just memberId ) ->
+                    ( model
+                    , Lamdera.sendToBackend
+                        (AddDatePredictionRequest matchId
+                            predictedDate
+                            memberId
+                            (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")
+                        )
+                    )
+
+                _ ->
+                    ( model, Cmd.none )
+
+        RemoveDatePrediction matchId ->
+            case ( model.currentTeam, model.activeMemberId ) of
+                ( Just team, Just memberId ) ->
+                    ( model
+                    , Lamdera.sendToBackend
+                        (RemoveDatePredictionRequest matchId
+                            memberId
+                            (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")
+                        )
+                    )
+
+                _ ->
+                    ( model, Cmd.none )
+
+        UpdatePredictionAvailability matchId predictedDate availability ->
+            case ( model.currentTeam, model.activeMemberId ) of
+                ( Just team, Just memberId ) ->
+                    ( model
+                    , Lamdera.sendToBackend
+                        (UpdatePredictionAvailabilityRequest matchId
+                            predictedDate
+                            memberId
+                            availability
+                            (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")
+                        )
+                    )
+
+                _ ->
+                    ( model, Cmd.none )
+
+        ChoosePredictedDate matchId chosenDate ->
+            case model.currentTeam of
+                Just team ->
+                    ( model
+                    , Lamdera.sendToBackend
+                        (ChoosePredictedDateRequest matchId
+                            chosenDate
+                            team.id
+                            (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")
+                        )
+                    )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
         -- Placeholder for now
         NoOpFrontendMsg ->
             ( model, Cmd.none )
@@ -679,7 +785,7 @@ updateFromBackend msg model =
                 ]
             )
 
-        TeamLoaded team matches members availability ->
+        TeamLoaded team matches members availability predictions ->
             let
                 shouldShowMemberSelection =
                     case model.activeMemberId of
@@ -695,6 +801,7 @@ updateFromBackend msg model =
                 , matches = matches
                 , members = members
                 , availability = availability
+                , datePredictions = predictions
                 , showMemberSelectionModal = shouldShowMemberSelection
               }
             , Cmd.none
@@ -758,19 +865,125 @@ updateFromBackend msg model =
                         )
                         model.matches
 
-                -- Remove all availability records for this match
-                updatedAvailability =
-                    List.filter (\record -> record.matchId /= matchId) model.availability
+                -- Don't clear availability here - AvailabilityUpdated messages will handle updates
+                -- This allows prediction migrations to work correctly
             in
             ( { model
                 | matches = updatedMatches
-                , availability = updatedAvailability
                 , showChangeMatchDateModal = False
                 , changeMatchDateMatchId = Nothing
                 , changeMatchDateForm = ""
               }
             , Cmd.none
             )
+
+        DatePredictionAdded prediction matchId ->
+            let
+                -- Get or create predictions dict for this match
+                matchPredictions =
+                    model.datePredictions
+                        |> Dict.get matchId
+                        |> Maybe.withDefault Dict.empty
+
+                -- Get predictions for this specific date
+                datePredictions =
+                    matchPredictions
+                        |> Dict.get prediction.predictedDate
+                        |> Maybe.withDefault Dict.empty
+
+                -- Add/update this member's prediction for this date
+                updatedDatePredictions =
+                    Dict.insert prediction.memberId prediction datePredictions
+
+                -- Update match predictions dict
+                updatedMatchPredictions =
+                    Dict.insert prediction.predictedDate updatedDatePredictions matchPredictions
+
+                updatedPredictions =
+                    Dict.insert matchId updatedMatchPredictions model.datePredictions
+            in
+            ( { model
+                | datePredictions = updatedPredictions
+                , showDatePredictionModal = False
+                , datePredictionMatchId = Nothing
+                , datePredictionForm = ""
+              }
+            , Cmd.none
+            )
+
+        DatePredictionUpdated prediction matchId ->
+            let
+                -- Get or create predictions dict for this match
+                matchPredictions =
+                    model.datePredictions
+                        |> Dict.get matchId
+                        |> Maybe.withDefault Dict.empty
+
+                -- Get predictions for this specific date
+                datePredictions =
+                    matchPredictions
+                        |> Dict.get prediction.predictedDate
+                        |> Maybe.withDefault Dict.empty
+
+                -- Update this member's prediction for this date
+                updatedDatePredictions =
+                    Dict.insert prediction.memberId prediction datePredictions
+
+                -- Update match predictions dict
+                updatedMatchPredictions =
+                    Dict.insert prediction.predictedDate updatedDatePredictions matchPredictions
+
+                updatedPredictions =
+                    Dict.insert matchId updatedMatchPredictions model.datePredictions
+            in
+            ( { model | datePredictions = updatedPredictions }, Cmd.none )
+
+        DatePredictionRemoved matchId memberId ->
+            let
+                -- Remove all predictions for this member/match combination
+                -- (remove member from all date predictions)
+                matchPredictions =
+                    model.datePredictions
+                        |> Dict.get matchId
+                        |> Maybe.withDefault Dict.empty
+
+                -- Remove member from all date predictions
+                updatedMatchPredictions =
+                    matchPredictions
+                        |> Dict.map (\date datePredictions -> Dict.remove memberId datePredictions)
+                        |> Dict.filter (\_ datePredictions -> not (Dict.isEmpty datePredictions))
+
+                updatedPredictions =
+                    if Dict.isEmpty updatedMatchPredictions then
+                        Dict.remove matchId model.datePredictions
+
+                    else
+                        Dict.insert matchId updatedMatchPredictions model.datePredictions
+            in
+            ( { model | datePredictions = updatedPredictions }, Cmd.none )
+
+        PredictionsCleared matchId ->
+            let
+                updatedPredictions =
+                    Dict.remove matchId model.datePredictions
+            in
+            ( { model | datePredictions = updatedPredictions }, Cmd.none )
+
+        MatchOriginalDateSet matchId originalDate ->
+            let
+                -- Update the match's originalDate field
+                updatedMatches =
+                    List.map
+                        (\match ->
+                            if match.id == matchId then
+                                { match | originalDate = Just originalDate }
+
+                            else
+                                match
+                        )
+                        model.matches
+            in
+            ( { model | matches = updatedMatches }, Cmd.none )
 
         NoOpToFrontend ->
             ( model, Cmd.none )
@@ -1415,6 +1628,11 @@ viewTeamPage model =
 
                   else
                     Html.text ""
+                , if model.showDatePredictionModal then
+                    viewDatePredictionModal model
+
+                  else
+                    Html.text ""
                 ]
 
         Nothing ->
@@ -2008,6 +2226,563 @@ viewMatchesSection model team =
         ]
 
 
+
+-- DATE PREDICTION HELPERS
+
+
+getPredictionsForMatch : String -> Model -> Dict String DatePrediction
+getPredictionsForMatch matchId model =
+    -- Flatten all predictions for this match into a single dict (memberId -> DatePrediction)
+    -- This is used for status calculation - we take the first prediction per member
+    model.datePredictions
+        |> Dict.get matchId
+        |> Maybe.withDefault Dict.empty
+        |> Dict.values
+        |> List.concatMap Dict.values
+        |> List.foldl
+            (\prediction acc ->
+                -- Only keep first prediction per member (for status calculation)
+                if Dict.member prediction.memberId acc then
+                    acc
+
+                else
+                    Dict.insert prediction.memberId prediction acc
+            )
+            Dict.empty
+
+
+getPredictionsGroupedByDate : Dict String DatePrediction -> Dict String (Dict String DatePrediction)
+getPredictionsGroupedByDate predictions =
+    predictions
+        |> Dict.values
+        |> List.foldl
+            (\prediction acc ->
+                let
+                    datePredictions =
+                        Dict.get prediction.predictedDate acc
+                            |> Maybe.withDefault Dict.empty
+                in
+                Dict.insert prediction.predictedDate (Dict.insert prediction.memberId prediction datePredictions) acc
+            )
+            Dict.empty
+
+
+getPredictionStatus : Dict String DatePrediction -> List Member -> Int -> MatchStatus
+getPredictionStatus datePredictions members playersNeeded =
+    let
+        -- Calculate summary from the date-specific predictions dict
+        predictionsList =
+            Dict.values datePredictions
+
+        summary =
+            List.foldl
+                (\prediction acc ->
+                    case prediction.availability of
+                        Available ->
+                            { acc | available = acc.available + 1 }
+
+                        NotAvailable ->
+                            { acc | notAvailable = acc.notAvailable + 1 }
+
+                        Maybe ->
+                            { acc | maybe = acc.maybe + 1 }
+                )
+                { available = 0, notAvailable = 0, maybe = 0, total = List.length members }
+                predictionsList
+    in
+    if summary.available >= playersNeeded then
+        Ready
+
+    else if summary.available + summary.maybe >= playersNeeded then
+        Possible
+
+    else
+        NotReady
+
+
+getMemberPredictionForDate : String -> String -> Dict String DatePrediction -> Maybe DatePrediction
+getMemberPredictionForDate memberId predictedDate predictions =
+    predictions
+        |> Dict.values
+        |> List.filter (\pred -> pred.memberId == memberId && pred.predictedDate == predictedDate)
+        |> List.head
+
+
+viewDatePredictionSection : Model -> Match -> Html FrontendMsg
+viewDatePredictionSection model match =
+    let
+        -- Get predictions already grouped by date: matchId -> predictedDate -> memberId -> DatePrediction
+        predictionsByDate =
+            model.datePredictions
+                |> Dict.get match.id
+                |> Maybe.withDefault Dict.empty
+
+        hasPredictions =
+            not (Dict.isEmpty predictionsByDate)
+
+        originalDateDisplay =
+            case match.originalDate of
+                Just origDate ->
+                    if origDate /= match.date then
+                        Just origDate
+
+                    else
+                        Nothing
+
+                Nothing ->
+                    Nothing
+    in
+    Html.div
+        [ Attr.style "margin-top" "0.75rem"
+        , Attr.style "padding-top" "0.75rem"
+        , Attr.style "border-top" "1px solid #e5e7eb"
+        ]
+        [ -- Original date display if different
+          case originalDateDisplay of
+            Just origDate ->
+                Html.div
+                    [ Attr.style "margin-bottom" "0.5rem"
+                    , Attr.style "padding" "0.5rem"
+                    , Attr.style "background-color" "#fef3c7"
+                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "font-size" "0.75rem"
+                    , Attr.style "color" "#92400e"
+                    ]
+                    [ Html.text ("Ursprüngliches Datum: " ++ isoToGermanDate origDate) ]
+
+            Nothing ->
+                Html.text ""
+
+        -- Predictions list
+        , if hasPredictions then
+            Html.div
+                [ Attr.style "margin-bottom" "0.75rem" ]
+                (predictionsByDate
+                    |> Dict.toList
+                    |> List.sortWith
+                        (\( dateA, _ ) ( dateB, _ ) ->
+                            -- Convert German date format (dd.mm.yyyy) to sortable format (yyyy-mm-dd)
+                            let
+                                convertToSortable : String -> String
+                                convertToSortable dateStr =
+                                    case String.split "." dateStr of
+                                        [ day, month, year ] ->
+                                            year ++ "-" ++ String.padLeft 2 '0' month ++ "-" ++ String.padLeft 2 '0' day
+
+                                        _ ->
+                                            dateStr
+
+                                sortableA =
+                                    convertToSortable dateA
+
+                                sortableB =
+                                    convertToSortable dateB
+                            in
+                            compare sortableA sortableB
+                        )
+                    |> List.map (\( date, datePredictions ) -> viewPredictedDateCard model match date datePredictions)
+                )
+
+          else
+            Html.text ""
+
+        -- Add prediction button
+        , Html.button
+            [ Events.onClick (ShowDatePredictionModal match.id)
+            , Attr.style "background-color" "#f3f4f6"
+            , Attr.style "border" "1px solid #d1d5db"
+            , Attr.style "border-radius" "0.375rem"
+            , Attr.style "padding" "0.5rem 0.75rem"
+            , Attr.style "font-size" "0.75rem"
+            , Attr.style "color" "#374151"
+            , Attr.style "cursor" "pointer"
+            , Attr.style "min-height" "44px"
+            , Attr.style "white-space" "nowrap"
+            , Attr.style "transition" "background-color 0.2s"
+            ]
+            [ Html.text
+                (if hasPredictions then
+                    "📅 Weitere Vorhersage hinzufügen"
+
+                 else
+                    "📅 Verlegung vorschlagen"
+                )
+            ]
+        ]
+
+
+viewPredictedDateCard : Model -> Match -> String -> Dict String DatePrediction -> Html FrontendMsg
+viewPredictedDateCard model match predictedDate datePredictions =
+    let
+        predictionsList =
+            Dict.values datePredictions
+
+        status =
+            getPredictionStatus datePredictions
+                model.members
+                (case model.currentTeam of
+                    Just team ->
+                        team.playersNeeded
+
+                    Nothing ->
+                        11
+                )
+
+        summary =
+            List.foldl
+                (\prediction acc ->
+                    case prediction.availability of
+                        Available ->
+                            { acc | available = acc.available + 1 }
+
+                        NotAvailable ->
+                            { acc | notAvailable = acc.notAvailable + 1 }
+
+                        Maybe ->
+                            { acc | maybe = acc.maybe + 1 }
+                )
+                { available = 0, notAvailable = 0, maybe = 0, total = List.length model.members }
+                predictionsList
+
+        statusColor =
+            matchStatusToColor status
+
+        statusBgColor =
+            matchStatusToBackgroundColor status
+
+        -- Find current member's prediction for this specific date
+        currentMemberPrediction =
+            case model.activeMemberId of
+                Just memberId ->
+                    Dict.get memberId datePredictions
+
+                Nothing ->
+                    Nothing
+
+        isExpanded =
+            List.member ( match.id, predictedDate ) model.expandedPredictions
+    in
+    Html.div
+        [ Attr.style "margin-bottom" "0.75rem"
+        , Attr.style "padding" "0.75rem"
+        , Attr.style "background-color" statusBgColor
+        , Attr.style "border" ("1px solid " ++ statusColor)
+        , Attr.style "border-radius" "0.375rem"
+        ]
+        [ Html.div
+            [ Attr.style "display" "flex"
+            , Attr.style "justify-content" "space-between"
+            , Attr.style "align-items" "flex-start"
+            , Attr.style "margin-bottom" "0.5rem"
+            , Attr.style "flex-wrap" "wrap"
+            , Attr.style "gap" "0.5rem"
+            ]
+            [ Html.div
+                [ Attr.style "flex" "1"
+                , Attr.style "display" "flex"
+                , Attr.style "justify-content" "space-between"
+                , Attr.style "align-items" "center"
+                , Attr.style "gap" "0.5rem"
+                ]
+                [ Html.div
+                    [ Attr.style "flex" "1" ]
+                    [ Html.div
+                        [ Attr.style "font-weight" "600"
+                        , Attr.style "color" "#1e293b"
+                        , Attr.style "margin-bottom" "0.25rem"
+                        ]
+                        [ Html.text (isoToGermanDate predictedDate) ]
+                    , Html.div
+                        [ Attr.style "font-size" "0.75rem"
+                        , Attr.style "color" "#64748b"
+                        ]
+                        [ Html.text
+                            ("✓ "
+                                ++ String.fromInt summary.available
+                                ++ " | ? "
+                                ++ String.fromInt summary.maybe
+                                ++ " | ✗ "
+                                ++ String.fromInt summary.notAvailable
+                            )
+                        ]
+                    ]
+                , Html.button
+                    [ Events.onClick (TogglePredictionDetails match.id predictedDate)
+                    , Attr.style "background-color" "#f8fafc"
+                    , Attr.style "border" "1px solid #e2e8f0"
+                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "padding" "0.5rem"
+                    , Attr.style "font-size" "1rem"
+                    , Attr.style "color" "#64748b"
+                    , Attr.style "cursor" "pointer"
+                    , Attr.style "min-height" "44px"
+                    , Attr.style "min-width" "44px"
+                    , Attr.style "transition" "background-color 0.2s"
+                    , Attr.style "display" "flex"
+                    , Attr.style "align-items" "center"
+                    , Attr.style "justify-content" "center"
+                    ]
+                    [ Html.text
+                        (if isExpanded then
+                            "👁️"
+
+                         else
+                            "👥"
+                        )
+                    ]
+                ]
+            , if status == Ready then
+                Html.button
+                    [ Events.onClick (ChoosePredictedDate match.id predictedDate)
+                    , Attr.style "background-color" "#10b981"
+                    , Attr.style "color" "white"
+                    , Attr.style "border" "none"
+                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "padding" "0.5rem 1rem"
+                    , Attr.style "font-size" "0.75rem"
+                    , Attr.style "font-weight" "500"
+                    , Attr.style "cursor" "pointer"
+                    , Attr.style "min-height" "44px"
+                    ]
+                    [ Html.text "Datum wählen" ]
+
+              else
+                Html.text ""
+            ]
+        , -- Current member's prediction controls
+          case ( model.activeMemberId, currentMemberPrediction ) of
+            ( Just memberId, Just prediction ) ->
+                Html.div
+                    [ Attr.style "margin-top" "0.5rem"
+                    , Attr.style "padding-top" "0.5rem"
+                    , Attr.style "border-top" "1px solid rgba(0,0,0,0.1)"
+                    ]
+                    [ Html.div
+                        [ Attr.style "font-size" "0.75rem"
+                        , Attr.style "color" "#64748b"
+                        , Attr.style "margin-bottom" "0.25rem"
+                        ]
+                        [ Html.text "Deine Verfügbarkeit:" ]
+                    , viewPredictionAvailabilityControls memberId match.id predictedDate (Just prediction.availability)
+                    ]
+
+            ( Just memberId, Nothing ) ->
+                Html.div
+                    [ Attr.style "margin-top" "0.5rem"
+                    , Attr.style "padding-top" "0.5rem"
+                    , Attr.style "border-top" "1px solid rgba(0,0,0,0.1)"
+                    ]
+                    [ Html.div
+                        [ Attr.style "font-size" "0.75rem"
+                        , Attr.style "color" "#64748b"
+                        , Attr.style "margin-bottom" "0.25rem"
+                        ]
+                        [ Html.text "Deine Verfügbarkeit:" ]
+                    , viewPredictionAvailabilityControls memberId match.id predictedDate Nothing
+                    ]
+
+            _ ->
+                Html.text ""
+        , if isExpanded then
+            viewPredictionDetailsExpanded match.id predictedDate datePredictions model.members
+
+          else
+            Html.text ""
+        ]
+
+
+viewDatePredictionModal : Model -> Html FrontendMsg
+viewDatePredictionModal model =
+    case model.datePredictionMatchId of
+        Just matchId ->
+            let
+                currentMatch =
+                    model.matches
+                        |> List.filter (\match -> match.id == matchId)
+                        |> List.head
+
+                -- Check if the entered date is already predicted by someone
+                enteredDate =
+                    String.trim model.datePredictionForm
+
+                dateAlreadyPredicted =
+                    if String.isEmpty enteredDate then
+                        False
+
+                    else
+                        model.datePredictions
+                            |> Dict.get matchId
+                            |> Maybe.withDefault Dict.empty
+                            |> Dict.member enteredDate
+
+                -- Check if current member already predicted this date
+                currentMemberHasPrediction =
+                    case model.activeMemberId of
+                        Just memberId ->
+                            model.datePredictions
+                                |> Dict.get matchId
+                                |> Maybe.withDefault Dict.empty
+                                |> Dict.get enteredDate
+                                |> Maybe.andThen (Dict.get memberId)
+                                |> Maybe.map (\_ -> True)
+                                |> Maybe.withDefault False
+
+                        Nothing ->
+                            False
+            in
+            Html.div
+                [ Attr.style "position" "fixed"
+                , Attr.style "top" "0"
+                , Attr.style "left" "0"
+                , Attr.style "right" "0"
+                , Attr.style "bottom" "0"
+                , Attr.style "background-color" "rgba(0,0,0,0.5)"
+                , Attr.style "display" "flex"
+                , Attr.style "align-items" "center"
+                , Attr.style "justify-content" "center"
+                , Attr.style "z-index" "1000"
+                , Events.onClick HideDatePredictionModal
+                ]
+                [ Html.div
+                    [ Attr.style "background-color" "white"
+                    , Attr.style "border-radius" "0.5rem"
+                    , Attr.style "max-width" "500px"
+                    , Attr.style "width" "90%"
+                    , Attr.style "max-height" "90vh"
+                    , Attr.style "overflow-y" "auto"
+                    , Attr.style "box-shadow" "0 10px 25px rgba(0,0,0,0.2)"
+                    , Events.stopPropagationOn "click" (Json.Decode.succeed ( NoOpFrontendMsg, True ))
+                    ]
+                    [ Html.div
+                        [ Attr.style "padding" "1.5rem"
+                        , Attr.style "border-bottom" "1px solid #e5e7eb"
+                        ]
+                        [ Html.div
+                            [ Attr.style "display" "flex"
+                            , Attr.style "justify-content" "space-between"
+                            , Attr.style "align-items" "center"
+                            ]
+                            [ Html.h3
+                                [ Attr.style "font-size" "1.25rem"
+                                , Attr.style "font-weight" "600"
+                                , Attr.style "color" "#1e293b"
+                                , Attr.style "margin" "0"
+                                ]
+                                [ Html.text "Verlegung vorschlagen" ]
+                            , Html.button
+                                [ Events.onClick HideDatePredictionModal
+                                , Attr.style "background" "none"
+                                , Attr.style "border" "none"
+                                , Attr.style "font-size" "1.5rem"
+                                , Attr.style "cursor" "pointer"
+                                , Attr.style "color" "#6b7280"
+                                ]
+                                [ Html.text "×" ]
+                            ]
+                        ]
+                    , Html.form
+                        [ Events.onSubmit
+                            (case model.datePredictionMatchId of
+                                Just mId ->
+                                    if String.isEmpty (String.trim model.datePredictionForm) then
+                                        NoOpFrontendMsg
+
+                                    else
+                                        AddDatePrediction mId model.datePredictionForm
+
+                                Nothing ->
+                                    NoOpFrontendMsg
+                            )
+                        , Attr.style "padding" "1.5rem"
+                        ]
+                        [ Html.div
+                            [ Attr.style "margin-bottom" "1.5rem" ]
+                            [ Html.label
+                                [ Attr.style "display" "block"
+                                , Attr.style "font-weight" "500"
+                                , Attr.style "color" "#374151"
+                                , Attr.style "margin-bottom" "0.5rem"
+                                ]
+                                [ Html.text "Vorhergesagtes Datum" ]
+                            , Html.input
+                                [ Attr.type_ "text"
+                                , Attr.value model.datePredictionForm
+                                , Events.onInput DatePredictionFormUpdated
+                                , Attr.placeholder "25.12.2024"
+                                , Attr.style "width" "100%"
+                                , Attr.style "padding" "0.75rem"
+                                , Attr.style "border"
+                                    ("1px solid "
+                                        ++ (if dateAlreadyPredicted then
+                                                "#f59e0b"
+
+                                            else
+                                                "#d1d5db"
+                                           )
+                                    )
+                                , Attr.style "border-radius" "0.375rem"
+                                , Attr.style "font-size" "1rem"
+                                ]
+                                []
+                            , if dateAlreadyPredicted then
+                                Html.div
+                                    [ Attr.style "margin-top" "0.5rem"
+                                    , Attr.style "padding" "0.5rem"
+                                    , Attr.style "background-color" "#fef3c7"
+                                    , Attr.style "border-radius" "0.375rem"
+                                    , Attr.style "font-size" "0.875rem"
+                                    , Attr.style "color" "#92400e"
+                                    ]
+                                    [ Html.text
+                                        (if currentMemberHasPrediction then
+                                            "Du hast dieses Datum bereits vorgeschlagen. Deine Verfügbarkeit wird aktualisiert."
+
+                                         else
+                                            "Dieses Datum wurde bereits von einem anderen Mitglied vorgeschlagen. Du kannst deine Verfügbarkeit dafür setzen."
+                                        )
+                                    ]
+
+                              else
+                                Html.text ""
+                            ]
+                        , Html.div
+                            [ Attr.style "display" "flex"
+                            , Attr.style "gap" "1rem"
+                            , Attr.style "justify-content" "flex-end"
+                            ]
+                            [ Html.button
+                                [ Attr.type_ "button"
+                                , Events.onClick HideDatePredictionModal
+                                , Attr.style "padding" "0.75rem 1.5rem"
+                                , Attr.style "border" "1px solid #d1d5db"
+                                , Attr.style "border-radius" "0.375rem"
+                                , Attr.style "background-color" "white"
+                                , Attr.style "color" "#374151"
+                                , Attr.style "cursor" "pointer"
+                                , Attr.style "font-weight" "500"
+                                ]
+                                [ Html.text "Abbrechen" ]
+                            , Html.button
+                                [ Attr.type_ "submit"
+                                , Attr.style "padding" "0.75rem 1.5rem"
+                                , Attr.style "border" "none"
+                                , Attr.style "border-radius" "0.375rem"
+                                , Attr.style "background-color" "#3b82f6"
+                                , Attr.style "color" "white"
+                                , Attr.style "cursor" "pointer"
+                                , Attr.style "font-weight" "500"
+                                , Attr.disabled (String.isEmpty (String.trim model.datePredictionForm))
+                                ]
+                                [ Html.text "Hinzufügen" ]
+                            ]
+                        ]
+                    ]
+                ]
+
+        Nothing ->
+            Html.text ""
+
+
 viewMatchItem : Model -> Team -> Match -> Bool -> Html FrontendMsg
 viewMatchItem model team match isLast =
     let
@@ -2079,21 +2854,7 @@ viewMatchItem model team match isLast =
                             , Attr.style "font-size" "0.875rem"
                             ]
                             [ Html.text (isoToGermanDate match.date ++ " um " ++ match.time) ]
-                        , Html.button
-                            [ Events.onClick (ShowChangeMatchDateModal match.id)
-                            , Attr.style "background-color" "#f3f4f6"
-                            , Attr.style "border" "1px solid #d1d5db"
-                            , Attr.style "border-radius" "0.375rem"
-                            , Attr.style "padding" "0.5rem 0.75rem"
-                            , Attr.style "font-size" "0.75rem"
-                            , Attr.style "color" "#374151"
-                            , Attr.style "cursor" "pointer"
-                            , Attr.style "min-height" "44px"
-                            , Attr.style "white-space" "nowrap"
-                            , Attr.style "transition" "background-color 0.2s"
-                            , Attr.style "margin-bottom" "0.5rem"
-                            ]
-                            [ Html.text "📅 Datum ändern" ]
+                        , viewDatePredictionSection model match
                         , Html.p
                             [ Attr.style "color" "#64748b"
                             , Attr.style "margin" "0 0 0.5rem 0"
@@ -2989,6 +3750,62 @@ viewAvailabilityControls memberId matchId currentAvailability =
         ]
 
 
+viewPredictionAvailabilityControls : String -> String -> String -> Maybe Availability -> Html FrontendMsg
+viewPredictionAvailabilityControls memberId matchId predictedDate currentAvailability =
+    Html.div
+        [ Attr.style "display" "flex"
+        , Attr.style "gap" "0.5rem"
+        , Attr.style "justify-content" "center"
+        , Attr.style "width" "100%"
+        ]
+        [ viewPredictionAvailabilityButton memberId matchId predictedDate Available "✓" (currentAvailability == Just Available)
+        , viewPredictionAvailabilityButton memberId matchId predictedDate Maybe "?" (currentAvailability == Just Maybe)
+        , viewPredictionAvailabilityButton memberId matchId predictedDate NotAvailable "✗" (currentAvailability == Just NotAvailable)
+        ]
+
+
+viewPredictionAvailabilityButton : String -> String -> String -> Availability -> String -> Bool -> Html FrontendMsg
+viewPredictionAvailabilityButton memberId matchId predictedDate availability icon isSelected =
+    Html.button
+        [ Events.stopPropagationOn "click" (Json.Decode.succeed ( UpdatePredictionAvailability matchId predictedDate availability, True ))
+        , Attr.style "background-color"
+            (if isSelected then
+                availabilityToColor availability
+
+             else
+                "#f8fafc"
+            )
+        , Attr.style "color"
+            (if isSelected then
+                "white"
+
+             else
+                "#64748b"
+            )
+        , Attr.style "border"
+            (if isSelected then
+                "1px solid " ++ availabilityToColor availability
+
+             else
+                "1px solid #e2e8f0"
+            )
+        , Attr.style "border-radius" "0.5rem"
+        , Attr.style "width" "44px"
+        , Attr.style "height" "44px"
+        , Attr.style "min-width" "44px"
+        , Attr.style "min-height" "44px"
+        , Attr.style "display" "flex"
+        , Attr.style "align-items" "center"
+        , Attr.style "justify-content" "center"
+        , Attr.style "cursor" "pointer"
+        , Attr.style "font-size" "0.875rem"
+        , Attr.style "font-weight" "600"
+        , Attr.style "transition" "all 0.2s"
+        , Attr.title (availabilityToString availability)
+        ]
+        [ Html.text icon ]
+
+
 viewAvailabilityButton : String -> String -> Availability -> String -> Bool -> Html FrontendMsg
 viewAvailabilityButton memberId matchId availability icon isSelected =
     Html.button
@@ -3204,6 +4021,64 @@ viewAvailabilityGroup title color icon members =
                 , Attr.style "gap" "0.25rem"
                 ]
                 (List.map viewMemberInGroup members)
+        ]
+
+
+viewPredictionDetailsExpanded : String -> String -> Dict String DatePrediction -> List Member -> Html FrontendMsg
+viewPredictionDetailsExpanded matchId predictedDate datePredictions members =
+    let
+        -- Group members by their prediction availability
+        groupedMembers =
+            members
+                |> List.map
+                    (\member ->
+                        let
+                            memberPrediction =
+                                Dict.get member.id datePredictions
+                                    |> Maybe.map .availability
+                        in
+                        ( member, memberPrediction )
+                    )
+                |> List.foldl
+                    (\( member, maybeAvailability ) acc ->
+                        case maybeAvailability of
+                            Just Available ->
+                                { acc | available = member :: acc.available }
+
+                            Just NotAvailable ->
+                                { acc | notAvailable = member :: acc.notAvailable }
+
+                            Just Maybe ->
+                                { acc | maybe = member :: acc.maybe }
+
+                            Nothing ->
+                                { acc | noResponse = member :: acc.noResponse }
+                    )
+                    { available = [], notAvailable = [], maybe = [], noResponse = [] }
+    in
+    Html.div
+        [ Attr.style "background-color" "#f8fafc"
+        , Attr.style "padding" "0.75rem"
+        , Attr.style "border-top" "1px solid #e2e8f0"
+        , Attr.style "margin-top" "0.5rem"
+        ]
+        [ Html.h6
+            [ Attr.style "font-size" "0.75rem"
+            , Attr.style "font-weight" "600"
+            , Attr.style "color" "#374151"
+            , Attr.style "margin" "0 0 0.75rem 0"
+            ]
+            [ Html.text "Verfügbarkeit für dieses Datum" ]
+        , Html.div
+            [ Attr.style "display" "grid"
+            , Attr.style "grid-template-columns" "repeat(auto-fit, minmax(200px, 1fr))"
+            , Attr.style "gap" "0.75rem"
+            ]
+            [ viewAvailabilityGroup "Verfügbar" "#10b981" "✓" groupedMembers.available
+            , viewAvailabilityGroup "Vielleicht" "#f59e0b" "?" groupedMembers.maybe
+            , viewAvailabilityGroup "Nicht verfügbar" "#ef4444" "✗" groupedMembers.notAvailable
+            , viewAvailabilityGroup "Keine Antwort" "#9ca3af" "?" groupedMembers.noResponse
+            ]
         ]
 
 
