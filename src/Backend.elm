@@ -151,6 +151,7 @@ updateFromFrontend sessionId clientId msg model =
                     , members = allMembers
                     , availability = Dict.empty
                     , datePredictions = Dict.empty
+                    , reservePlayers = Dict.empty
                     }
 
                 updatedModel =
@@ -215,9 +216,13 @@ updateFromFrontend sessionId clientId msg model =
                             -- Include date predictions
                             teamPredictions =
                                 teamData.datePredictions
+
+                            -- Include reserve players
+                            teamReservePlayers =
+                                teamData.reservePlayers
                         in
                         ( updatedModel
-                        , sendToFrontend sessionId (TeamLoaded teamData.team teamMatches teamMembers teamAvailability teamPredictions)
+                        , sendToFrontend sessionId (TeamLoaded teamData.team teamMatches teamMembers teamAvailability teamPredictions teamReservePlayers)
                         )
 
                     else
@@ -489,9 +494,13 @@ updateFromFrontend sessionId clientId msg model =
                             -- Include date predictions
                             teamPredictions =
                                 teamData.datePredictions
+
+                            -- Include reserve players
+                            teamReservePlayers =
+                                teamData.reservePlayers
                         in
                         ( updatedModel
-                        , sendToFrontend sessionId (TeamLoaded teamData.team teamMatches teamMembers teamAvailability teamPredictions)
+                        , sendToFrontend sessionId (TeamLoaded teamData.team teamMatches teamMembers teamAvailability teamPredictions teamReservePlayers)
                         )
 
                     else
@@ -841,6 +850,154 @@ updateFromFrontend sessionId clientId msg model =
                             , sendToTeamSessions teamId (PredictionsCleared matchId) updatedModel
                             , availabilityUpdateCmds
                             ]
+                        )
+
+                    else
+                        ( model, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        AddReservePlayerRequest matchId reservePlayerName teamId accessCode ->
+            case Dict.get teamId model.teams of
+                Just teamData ->
+                    -- Validate access code
+                    if accessCode == teamData.team.accessCode then
+                        let
+                            -- Find the team that contains this match
+                            findTeamWithMatch : ( TeamId, TeamData ) -> Bool
+                            findTeamWithMatch ( _, td ) =
+                                td.seasons
+                                    |> Dict.values
+                                    |> List.concatMap (\seasonData -> seasonData.hinrunde ++ seasonData.rückrunde)
+                                    |> List.any (\match -> match.id == matchId)
+
+                            currentTeamData =
+                                if findTeamWithMatch ( teamId, teamData ) then
+                                    teamData
+
+                                else
+                                    -- Match not found in this team, find the correct team
+                                    model.teams
+                                        |> Dict.toList
+                                        |> List.filter findTeamWithMatch
+                                        |> List.head
+                                        |> Maybe.map Tuple.second
+                                        |> Maybe.withDefault teamData
+
+                            -- Get current reserve players for this match
+                            currentReservePlayers =
+                                currentTeamData.reservePlayers
+                                    |> Dict.get matchId
+                                    |> Maybe.withDefault []
+
+                            -- Add reserve player if not already present
+                            updatedReservePlayers =
+                                if List.member reservePlayerName currentReservePlayers then
+                                    currentReservePlayers
+
+                                else
+                                    reservePlayerName :: currentReservePlayers
+
+                            -- Update reserve players dict
+                            updatedReservePlayersDict =
+                                Dict.insert matchId updatedReservePlayers currentTeamData.reservePlayers
+
+                            -- Find the correct team ID
+                            correctTeamId =
+                                if findTeamWithMatch ( teamId, teamData ) then
+                                    teamId
+
+                                else
+                                    model.teams
+                                        |> Dict.toList
+                                        |> List.filter findTeamWithMatch
+                                        |> List.head
+                                        |> Maybe.map Tuple.first
+                                        |> Maybe.withDefault teamId
+
+                            updatedTeamData =
+                                { currentTeamData | reservePlayers = updatedReservePlayersDict }
+
+                            updatedModel =
+                                { model | teams = Dict.insert correctTeamId updatedTeamData model.teams }
+                        in
+                        ( updatedModel
+                        , sendToTeamSessions correctTeamId (ReservePlayerAdded matchId reservePlayerName correctTeamId) updatedModel
+                        )
+
+                    else
+                        ( model, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        RemoveReservePlayerRequest matchId reservePlayerName teamId accessCode ->
+            case Dict.get teamId model.teams of
+                Just teamData ->
+                    -- Validate access code
+                    if accessCode == teamData.team.accessCode then
+                        let
+                            -- Find the team that contains this match
+                            findTeamWithMatch : ( TeamId, TeamData ) -> Bool
+                            findTeamWithMatch ( _, td ) =
+                                td.seasons
+                                    |> Dict.values
+                                    |> List.concatMap (\seasonData -> seasonData.hinrunde ++ seasonData.rückrunde)
+                                    |> List.any (\match -> match.id == matchId)
+
+                            currentTeamData =
+                                if findTeamWithMatch ( teamId, teamData ) then
+                                    teamData
+
+                                else
+                                    -- Match not found in this team, find the correct team
+                                    model.teams
+                                        |> Dict.toList
+                                        |> List.filter findTeamWithMatch
+                                        |> List.head
+                                        |> Maybe.map Tuple.second
+                                        |> Maybe.withDefault teamData
+
+                            -- Get current reserve players for this match
+                            currentReservePlayers =
+                                currentTeamData.reservePlayers
+                                    |> Dict.get matchId
+                                    |> Maybe.withDefault []
+
+                            -- Remove reserve player
+                            updatedReservePlayers =
+                                List.filter (\name -> name /= reservePlayerName) currentReservePlayers
+
+                            -- Update reserve players dict
+                            updatedReservePlayersDict =
+                                if List.isEmpty updatedReservePlayers then
+                                    Dict.remove matchId currentTeamData.reservePlayers
+
+                                else
+                                    Dict.insert matchId updatedReservePlayers currentTeamData.reservePlayers
+
+                            -- Find the correct team ID
+                            correctTeamId =
+                                if findTeamWithMatch ( teamId, teamData ) then
+                                    teamId
+
+                                else
+                                    model.teams
+                                        |> Dict.toList
+                                        |> List.filter findTeamWithMatch
+                                        |> List.head
+                                        |> Maybe.map Tuple.first
+                                        |> Maybe.withDefault teamId
+
+                            updatedTeamData =
+                                { currentTeamData | reservePlayers = updatedReservePlayersDict }
+
+                            updatedModel =
+                                { model | teams = Dict.insert correctTeamId updatedTeamData model.teams }
+                        in
+                        ( updatedModel
+                        , sendToTeamSessions correctTeamId (ReservePlayerRemoved matchId reservePlayerName correctTeamId) updatedModel
                         )
 
                     else

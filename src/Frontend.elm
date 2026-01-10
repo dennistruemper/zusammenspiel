@@ -84,6 +84,10 @@ init url key =
             , showDatePredictionModal = False
             , datePredictionMatchId = Nothing
             , datePredictionForm = ""
+            , reservePlayers = Dict.empty
+            , showAddReservePlayerModal = False
+            , addReservePlayerMatchId = Nothing
+            , addReservePlayerForm = ""
             }
 
         ( updatedModel, cmd ) =
@@ -760,6 +764,61 @@ update msg model =
                     ( model, Cmd.none )
 
         -- Placeholder for now
+        ShowAddReservePlayerModal matchId ->
+            ( { model
+                | showAddReservePlayerModal = True
+                , addReservePlayerMatchId = Just matchId
+                , addReservePlayerForm = ""
+              }
+            , Cmd.none
+            )
+
+        HideAddReservePlayerModal ->
+            ( { model
+                | showAddReservePlayerModal = False
+                , addReservePlayerMatchId = Nothing
+                , addReservePlayerForm = ""
+              }
+            , Cmd.none
+            )
+
+        AddReservePlayerFormUpdated name ->
+            ( { model | addReservePlayerForm = name }, Cmd.none )
+
+        AddReservePlayer matchId reservePlayerName ->
+            case model.currentTeam of
+                Just team ->
+                    ( { model
+                        | showAddReservePlayerModal = False
+                        , addReservePlayerMatchId = Nothing
+                        , addReservePlayerForm = ""
+                      }
+                    , Lamdera.sendToBackend
+                        (AddReservePlayerRequest matchId
+                            reservePlayerName
+                            team.id
+                            (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")
+                        )
+                    )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        RemoveReservePlayer matchId reservePlayerName ->
+            case model.currentTeam of
+                Just team ->
+                    ( model
+                    , Lamdera.sendToBackend
+                        (RemoveReservePlayerRequest matchId
+                            reservePlayerName
+                            team.id
+                            (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")
+                        )
+                    )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
         NoOpFrontendMsg ->
             ( model, Cmd.none )
 
@@ -785,7 +844,7 @@ updateFromBackend msg model =
                 ]
             )
 
-        TeamLoaded team matches members availability predictions ->
+        TeamLoaded team matches members availability predictions reservePlayers ->
             let
                 shouldShowMemberSelection =
                     case model.activeMemberId of
@@ -802,6 +861,7 @@ updateFromBackend msg model =
                 , members = members
                 , availability = availability
                 , datePredictions = predictions
+                , reservePlayers = reservePlayers
                 , showMemberSelectionModal = shouldShowMemberSelection
               }
             , Cmd.none
@@ -984,6 +1044,54 @@ updateFromBackend msg model =
                         model.matches
             in
             ( { model | matches = updatedMatches }, Cmd.none )
+
+        ReservePlayerAdded matchId reservePlayerName teamId ->
+            let
+                -- Get current reserve players for this match
+                currentReservePlayers =
+                    model.reservePlayers
+                        |> Dict.get matchId
+                        |> Maybe.withDefault []
+
+                -- Add reserve player if not already present
+                updatedReservePlayers =
+                    if List.member reservePlayerName currentReservePlayers then
+                        currentReservePlayers
+
+                    else
+                        reservePlayerName :: currentReservePlayers
+
+                -- Update reserve players dict
+                updatedReservePlayersDict =
+                    Dict.insert matchId updatedReservePlayers model.reservePlayers
+            in
+            ( { model | reservePlayers = updatedReservePlayersDict }
+            , Cmd.none
+            )
+
+        ReservePlayerRemoved matchId reservePlayerName teamId ->
+            let
+                -- Get current reserve players for this match
+                currentReservePlayers =
+                    model.reservePlayers
+                        |> Dict.get matchId
+                        |> Maybe.withDefault []
+
+                -- Remove reserve player
+                updatedReservePlayers =
+                    List.filter (\name -> name /= reservePlayerName) currentReservePlayers
+
+                -- Update reserve players dict
+                updatedReservePlayersDict =
+                    if List.isEmpty updatedReservePlayers then
+                        Dict.remove matchId model.reservePlayers
+
+                    else
+                        Dict.insert matchId updatedReservePlayers model.reservePlayers
+            in
+            ( { model | reservePlayers = updatedReservePlayersDict }
+            , Cmd.none
+            )
 
         NoOpToFrontend ->
             ( model, Cmd.none )
@@ -1633,6 +1741,11 @@ viewTeamPage model =
 
                   else
                     Html.text ""
+                , if model.showAddReservePlayerModal then
+                    viewAddReservePlayerModal model
+
+                  else
+                    Html.text ""
                 ]
 
         Nothing ->
@@ -1813,11 +1926,22 @@ type MatchStatus
     | Past -- Past matches (No color)
 
 
-getMatchStatus : String -> String -> String -> List Member -> List AvailabilityRecord -> Int -> Dict String (Dict String (Dict String DatePrediction)) -> MatchStatus
-getMatchStatus matchId matchDate today members availability playersNeeded datePredictions =
+getMatchStatus : String -> String -> String -> List Member -> List AvailabilityRecord -> Int -> Dict String (Dict String (Dict String DatePrediction)) -> Dict String (List String) -> MatchStatus
+getMatchStatus matchId matchDate today members availability playersNeeded datePredictions reservePlayers =
     let
         summary =
             getMatchAvailabilitySummary matchId members availability
+
+        -- Count reserve players for this match
+        reservePlayerCount =
+            reservePlayers
+                |> Dict.get matchId
+                |> Maybe.map List.length
+                |> Maybe.withDefault 0
+
+        -- Total available players including reserves
+        totalAvailable =
+            summary.available + reservePlayerCount
 
         -- Convert German date format (dd.mm.yyyy) to sortable format (yyyy-mm-dd)
         convertToSortable : String -> String
@@ -1882,10 +2006,10 @@ getMatchStatus matchId matchDate today members availability playersNeeded datePr
         -- Show as Possible (yellow) even if availability is good
         Possible
 
-    else if summary.available >= playersNeeded then
+    else if totalAvailable >= playersNeeded then
         Ready
 
-    else if summary.available + summary.maybe >= playersNeeded then
+    else if totalAvailable + summary.maybe >= playersNeeded then
         Possible
 
     else if isLessThanTwoWeeksAway then
@@ -2794,6 +2918,127 @@ viewDatePredictionModal model =
             Html.text ""
 
 
+viewAddReservePlayerModal : Model -> Html FrontendMsg
+viewAddReservePlayerModal model =
+    case model.addReservePlayerMatchId of
+        Just matchId ->
+            let
+                currentMatch =
+                    model.matches
+                        |> List.filter (\match -> match.id == matchId)
+                        |> List.head
+            in
+            Html.div
+                [ Attr.style "position" "fixed"
+                , Attr.style "top" "0"
+                , Attr.style "left" "0"
+                , Attr.style "right" "0"
+                , Attr.style "bottom" "0"
+                , Attr.style "background-color" "rgba(0,0,0,0.5)"
+                , Attr.style "display" "flex"
+                , Attr.style "align-items" "center"
+                , Attr.style "justify-content" "center"
+                , Attr.style "z-index" "1000"
+                , Events.stopPropagationOn "click" (Json.Decode.succeed ( NoOpFrontendMsg, True ))
+                ]
+                [ Html.div
+                    [ Attr.style "background-color" "white"
+                    , Attr.style "border-radius" "0.5rem"
+                    , Attr.style "padding" "0"
+                    , Attr.style "max-width" "90vw"
+                    , Attr.style "width" "100%"
+                    , Attr.style "max-width" "500px"
+                    , Attr.style "box-shadow" "0 10px 25px rgba(0,0,0,0.2)"
+                    , Attr.style "box-sizing" "border-box"
+                    , Events.stopPropagationOn "click" (Json.Decode.succeed ( NoOpFrontendMsg, True ))
+                    ]
+                    [ Html.div
+                        [ Attr.style "padding" "1.5rem"
+                        , Attr.style "box-sizing" "border-box"
+                        ]
+                        [ Html.h3
+                            [ Attr.style "font-size" "1.25rem"
+                            , Attr.style "font-weight" "600"
+                            , Attr.style "color" "#1e293b"
+                            , Attr.style "margin" "0 0 1rem 0"
+                            ]
+                            [ Html.text "Ersatzspieler hinzufügen" ]
+                        , Html.form
+                            [ Events.onSubmit
+                                (if String.isEmpty (String.trim model.addReservePlayerForm) then
+                                    NoOpFrontendMsg
+
+                                 else
+                                    AddReservePlayer matchId model.addReservePlayerForm
+                                )
+                            , Attr.style "display" "flex"
+                            , Attr.style "flex-direction" "column"
+                            , Attr.style "gap" "1rem"
+                            ]
+                            [ Html.label
+                                [ Attr.style "display" "flex"
+                                , Attr.style "flex-direction" "column"
+                                , Attr.style "gap" "0.5rem"
+                                ]
+                                [ Html.span
+                                    [ Attr.style "font-size" "0.875rem"
+                                    , Attr.style "font-weight" "500"
+                                    , Attr.style "color" "#374151"
+                                    ]
+                                    [ Html.text "Name des Ersatzspielers" ]
+                                , Html.input
+                                    [ Attr.type_ "text"
+                                    , Attr.value model.addReservePlayerForm
+                                    , Events.onInput AddReservePlayerFormUpdated
+                                    , Attr.placeholder "z.B. Max Mustermann"
+                                    , Attr.style "width" "100%"
+                                    , Attr.style "box-sizing" "border-box"
+                                    , Attr.style "padding" "0.75rem"
+                                    , Attr.style "border" "1px solid #d1d5db"
+                                    , Attr.style "border-radius" "0.375rem"
+                                    , Attr.style "font-size" "0.875rem"
+                                    ]
+                                    []
+                                ]
+                            , Html.div
+                                [ Attr.style "display" "flex"
+                                , Attr.style "justify-content" "flex-end"
+                                , Attr.style "gap" "0.75rem"
+                                ]
+                                [ Html.button
+                                    [ Attr.type_ "button"
+                                    , Events.onClick HideAddReservePlayerModal
+                                    , Attr.style "padding" "0.75rem 1.5rem"
+                                    , Attr.style "border" "1px solid #d1d5db"
+                                    , Attr.style "border-radius" "0.375rem"
+                                    , Attr.style "background-color" "white"
+                                    , Attr.style "color" "#374151"
+                                    , Attr.style "cursor" "pointer"
+                                    , Attr.style "font-weight" "500"
+                                    ]
+                                    [ Html.text "Abbrechen" ]
+                                , Html.button
+                                    [ Attr.type_ "submit"
+                                    , Attr.style "padding" "0.75rem 1.5rem"
+                                    , Attr.style "border" "none"
+                                    , Attr.style "border-radius" "0.375rem"
+                                    , Attr.style "background-color" "#3b82f6"
+                                    , Attr.style "color" "white"
+                                    , Attr.style "cursor" "pointer"
+                                    , Attr.style "font-weight" "500"
+                                    , Attr.disabled (String.isEmpty (String.trim model.addReservePlayerForm))
+                                    ]
+                                    [ Html.text "Hinzufügen" ]
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+
+        Nothing ->
+            Html.text ""
+
+
 viewMatchItem : Model -> Team -> Match -> Bool -> Html FrontendMsg
 viewMatchItem model team match isLast =
     let
@@ -2804,7 +3049,7 @@ viewMatchItem model team match isLast =
             model.currentDate |> Maybe.withDefault "01.01.2024"
 
         matchStatus =
-            getMatchStatus match.id match.date today model.members model.availability team.playersNeeded model.datePredictions
+            getMatchStatus match.id match.date today model.members model.availability team.playersNeeded model.datePredictions model.reservePlayers
 
         statusBackgroundColor =
             matchStatusToBackgroundColor matchStatus
@@ -2961,7 +3206,7 @@ viewMatchItem model team match isLast =
                         , Attr.style "justify-content" "space-between"
                         , Attr.style "align-items" "center"
                         ]
-                        [ viewAvailabilityOverview match.id model.members model.availability
+                        [ viewAvailabilityOverview match.id model.members model.availability model.reservePlayers team.playersNeeded
                         , Html.button
                             [ Events.onClick (ToggleMatchDetails match.id)
                             , Attr.style "background-color" "#f8fafc"
@@ -2991,7 +3236,7 @@ viewMatchItem model team match isLast =
                 ]
             ]
         , if isExpanded then
-            viewMatchDetailsExpanded match.id model.members model.availability
+            viewMatchDetailsExpanded match.id model.members model.availability model.reservePlayers model
 
           else
             Html.text ""
@@ -3875,16 +4120,28 @@ viewAvailabilityButton memberId matchId availability icon isSelected =
         [ Html.text icon ]
 
 
-viewAvailabilityOverview : String -> List Member -> List AvailabilityRecord -> Html FrontendMsg
-viewAvailabilityOverview matchId members availability =
+viewAvailabilityOverview : String -> List Member -> List AvailabilityRecord -> Dict String (List String) -> Int -> Html FrontendMsg
+viewAvailabilityOverview matchId members availability reservePlayers playersNeeded =
     let
         summary =
             getMatchAvailabilitySummary matchId members availability
 
         noResponses =
             summary.total - summary.available - summary.notAvailable - summary.maybe
+
+        reservePlayerCount =
+            reservePlayers
+                |> Dict.get matchId
+                |> Maybe.map List.length
+                |> Maybe.withDefault 0
+
+        totalAvailable =
+            summary.available + reservePlayerCount
+
+        playersMissing =
+            playersNeeded - totalAvailable
     in
-    if summary.total == 0 then
+    if summary.total == 0 && reservePlayerCount == 0 then
         Html.text ""
 
     else
@@ -3905,8 +4162,8 @@ viewAvailabilityOverview matchId members availability =
                 , Attr.style "gap" "0.25rem"
                 , Attr.style "align-items" "center"
                 ]
-                [ if summary.available > 0 then
-                    viewAvailabilitySummaryBadge "✓" (String.fromInt summary.available) "#10b981"
+                [ if totalAvailable > 0 then
+                    viewAvailabilitySummaryBadge "✓" (String.fromInt totalAvailable) "#10b981"
 
                   else
                     Html.text ""
@@ -3925,7 +4182,23 @@ viewAvailabilityOverview matchId members availability =
 
                   else
                     Html.text ""
+                , if reservePlayerCount > 0 then
+                    viewAvailabilitySummaryBadge "🔄" (String.fromInt reservePlayerCount) "#3b82f6"
+
+                  else
+                    Html.text ""
                 ]
+            , if playersMissing > 0 then
+                Html.span
+                    [ Attr.style "font-size" "0.75rem"
+                    , Attr.style "color" "#ef4444"
+                    , Attr.style "font-weight" "600"
+                    , Attr.style "margin-left" "0.25rem"
+                    ]
+                    [ Html.text ("Fehlen: " ++ String.fromInt playersMissing) ]
+
+              else
+                Html.text ""
             ]
 
 
@@ -3941,14 +4214,21 @@ viewAvailabilitySummaryBadge icon count color =
         , Attr.style "border-radius" "0.375rem"
         , Attr.style "font-size" "0.75rem"
         , Attr.style "font-weight" "600"
+        , Attr.style "line-height" "1"
+        , Attr.style "height" "1.25rem"
         ]
-        [ Html.span [] [ Html.text icon ]
+        [ Html.span
+            [ Attr.style "display" "inline-flex"
+            , Attr.style "align-items" "center"
+            , Attr.style "line-height" "1"
+            ]
+            [ Html.text icon ]
         , Html.span [] [ Html.text count ]
         ]
 
 
-viewMatchDetailsExpanded : String -> List Member -> List AvailabilityRecord -> Html FrontendMsg
-viewMatchDetailsExpanded matchId members availability =
+viewMatchDetailsExpanded : String -> List Member -> List AvailabilityRecord -> Dict String (List String) -> Model -> Html FrontendMsg
+viewMatchDetailsExpanded matchId members availability reservePlayers model =
     let
         groupedMembers =
             members
@@ -4001,6 +4281,92 @@ viewMatchDetailsExpanded matchId members availability =
             , viewAvailabilityGroup "Vielleicht" "#f59e0b" "?" groupedMembers.maybe
             , viewAvailabilityGroup "Nicht verfügbar" "#ef4444" "✗" groupedMembers.notAvailable
             , viewAvailabilityGroup "Keine Antwort" "#9ca3af" "?" groupedMembers.noResponse
+            ]
+        , -- Reserve players section
+          let
+            matchReservePlayers =
+                reservePlayers
+                    |> Dict.get matchId
+                    |> Maybe.withDefault []
+          in
+          Html.div
+            [ Attr.style "margin-top" "1.5rem"
+            , Attr.style "padding-top" "1.5rem"
+            , Attr.style "border-top" "1px solid #e2e8f0"
+            ]
+            [ Html.div
+                [ Attr.style "display" "flex"
+                , Attr.style "justify-content" "space-between"
+                , Attr.style "align-items" "center"
+                , Attr.style "margin-bottom" "0.75rem"
+                ]
+                [ Html.h5
+                    [ Attr.style "font-size" "0.875rem"
+                    , Attr.style "font-weight" "600"
+                    , Attr.style "color" "#374151"
+                    , Attr.style "margin" "0"
+                    ]
+                    [ Html.text "Ersatzspieler" ]
+                , Html.button
+                    [ Events.onClick (ShowAddReservePlayerModal matchId)
+                    , Attr.style "background-color" "#3b82f6"
+                    , Attr.style "color" "white"
+                    , Attr.style "border" "none"
+                    , Attr.style "border-radius" "0.375rem"
+                    , Attr.style "padding" "0.375rem 0.75rem"
+                    , Attr.style "font-size" "0.75rem"
+                    , Attr.style "font-weight" "500"
+                    , Attr.style "cursor" "pointer"
+                    ]
+                    [ Html.text "+ Hinzufügen" ]
+                ]
+            , if List.isEmpty matchReservePlayers then
+                Html.p
+                    [ Attr.style "color" "#9ca3af"
+                    , Attr.style "font-size" "0.75rem"
+                    , Attr.style "margin" "0"
+                    , Attr.style "font-style" "italic"
+                    ]
+                    [ Html.text "Keine Ersatzspieler hinzugefügt" ]
+
+              else
+                Html.div
+                    [ Attr.style "display" "flex"
+                    , Attr.style "flex-direction" "column"
+                    , Attr.style "gap" "0.5rem"
+                    ]
+                    (List.map
+                        (\reservePlayerName ->
+                            Html.div
+                                [ Attr.style "display" "flex"
+                                , Attr.style "justify-content" "space-between"
+                                , Attr.style "align-items" "center"
+                                , Attr.style "padding" "0.5rem 0.75rem"
+                                , Attr.style "background-color" "white"
+                                , Attr.style "border" "1px solid #e2e8f0"
+                                , Attr.style "border-radius" "0.375rem"
+                                ]
+                                [ Html.span
+                                    [ Attr.style "font-size" "0.875rem"
+                                    , Attr.style "color" "#374151"
+                                    ]
+                                    [ Html.text reservePlayerName ]
+                                , Html.button
+                                    [ Events.onClick (RemoveReservePlayer matchId reservePlayerName)
+                                    , Attr.style "background-color" "transparent"
+                                    , Attr.style "color" "#ef4444"
+                                    , Attr.style "border" "none"
+                                    , Attr.style "border-radius" "0.375rem"
+                                    , Attr.style "padding" "0.25rem 0.5rem"
+                                    , Attr.style "font-size" "0.75rem"
+                                    , Attr.style "cursor" "pointer"
+                                    , Attr.style "font-weight" "500"
+                                    ]
+                                    [ Html.text "Entfernen" ]
+                                ]
+                        )
+                        matchReservePlayers
+                    )
             ]
         ]
 

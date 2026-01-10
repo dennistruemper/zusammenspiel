@@ -94,6 +94,7 @@ type alias TeamData =
     , members : Dict String Member -- memberId -> Member
     , availability : Dict String (Dict String Availability) -- memberId -> (matchId -> Availability)
     , datePredictions : Dict String (Dict String (Dict String DatePrediction)) -- matchId -> (predictedDate -> (memberId -> DatePrediction))
+    , reservePlayers : Dict String (List String) -- matchId -> list of reserve player names
     }
 
 
@@ -140,6 +141,10 @@ type alias FrontendModel =
     , showDatePredictionModal : Bool
     , datePredictionMatchId : Maybe String -- ID of match for which we're adding/editing predictions
     , datePredictionForm : String -- Date input for new prediction
+    , reservePlayers : Dict String (List String) -- matchId -> list of reserve player names
+    , showAddReservePlayerModal : Bool
+    , addReservePlayerMatchId : Maybe String -- ID of match for which we're adding a reserve player
+    , addReservePlayerForm : String -- Name input for new reserve player
     }
 
 
@@ -241,6 +246,11 @@ type FrontendMsg
     | RemoveDatePrediction String -- matchId
     | UpdatePredictionAvailability String String Availability -- matchId, predictedDate, availability
     | ChoosePredictedDate String String -- matchId, chosenDate
+    | ShowAddReservePlayerModal String -- matchId
+    | HideAddReservePlayerModal
+    | AddReservePlayerFormUpdated String -- new reserve player name
+    | AddReservePlayer String String -- matchId, reservePlayerName
+    | RemoveReservePlayer String String -- matchId, reservePlayerName
     | NoOpFrontendMsg
 
 
@@ -256,6 +266,8 @@ type ToBackend
     | UpdatePredictionAvailabilityRequest String String String Availability String -- matchId, predictedDate, memberId, availability, accessCode
     | RemoveDatePredictionRequest String String String -- matchId, memberId, accessCode
     | ChoosePredictedDateRequest String String String String -- matchId, chosenDate, teamId, accessCode
+    | AddReservePlayerRequest String String String String -- matchId, reservePlayerName, teamId, accessCode
+    | RemoveReservePlayerRequest String String String String -- matchId, reservePlayerName, teamId, accessCode
     | NoOpToBackend
 
 
@@ -265,7 +277,7 @@ type BackendMsg
 
 type ToFrontend
     = TeamCreated Team String String -- Team, creator member ID, and access code
-    | TeamLoaded Team (List Match) (List Member) (List AvailabilityRecord) (Dict String (Dict String (Dict String DatePrediction))) -- Team, matches, members, availability, datePredictions
+    | TeamLoaded Team (List Match) (List Member) (List AvailabilityRecord) (Dict String (Dict String (Dict String DatePrediction))) (Dict String (List String)) -- Team, matches, members, availability, datePredictions, reservePlayers
     | TeamNotFound
     | AccessCodeRequired TeamId -- Request access code for team access
     | MatchCreated Match
@@ -277,4 +289,6 @@ type ToFrontend
     | DatePredictionRemoved String String -- matchId, memberId
     | PredictionsCleared String -- matchId
     | MatchOriginalDateSet String String -- matchId, originalDate
+    | ReservePlayerAdded String String String -- matchId, reservePlayerName, teamId
+    | ReservePlayerRemoved String String String -- matchId, reservePlayerName, teamId
     | NoOpToFrontend
