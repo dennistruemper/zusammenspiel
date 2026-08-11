@@ -1,4 +1,4 @@
-module IcsParser exposing (parseIcs, IcsEvent, parseIcsEvents, parseIcsToMatches, ParsedMatch)
+module IcsParser exposing (IcsEvent, ParsedMatch, parseIcs, parseIcsEvents, parseIcsToMatches)
 
 import Dict exposing (Dict)
 import String
@@ -19,10 +19,14 @@ type alias ParsedMatch =
     , time : String -- German format: "20:00"
     , venue : String
     , isHome : Bool
+    , startUtc : String -- Raw UTC timestamp from ICS: "20250922T180000Z"
     }
 
 
+
 -- Parse ICS file content and extract VEVENT entries
+
+
 parseIcs : String -> List IcsEvent
 parseIcs icsContent =
     let
@@ -104,13 +108,19 @@ parseEventHelper lines event acc =
                 parseEventHelper rest event acc
 
 
+
 -- Parse ICS events and convert to list of events (for debugging/testing)
+
+
 parseIcsEvents : String -> List IcsEvent
 parseIcsEvents =
     parseIcs
 
 
+
 -- Convert ISO date/time string (20250922T180000Z) to German date format (22.09.2025)
+
+
 isoDateTimeToGermanDate : String -> String
 isoDateTimeToGermanDate isoDateTime =
     if String.length isoDateTime >= 8 then
@@ -130,7 +140,10 @@ isoDateTimeToGermanDate isoDateTime =
         ""
 
 
+
 -- Convert ISO date/time string (20250922T180000Z) to German time format (20:00)
+
+
 isoDateTimeToGermanTime : String -> String
 isoDateTimeToGermanTime isoDateTime =
     if String.length isoDateTime >= 13 then
@@ -147,9 +160,12 @@ isoDateTimeToGermanTime isoDateTime =
         ""
 
 
+
 -- Extract team names from SUMMARY field
 -- Format: "Rendsburger TSV 4 - Osterbyer SV 2 (Kreisliga Erwachsene)"
 -- Returns: (homeTeam, awayTeam) or Nothing if format is invalid
+
+
 extractTeams : String -> Maybe ( String, String )
 extractTeams summary =
     let
@@ -174,7 +190,10 @@ extractTeams summary =
             Nothing
 
 
+
 -- Count how many times each team appears as home team
+
+
 countHomeTeamOccurrences : List IcsEvent -> Dict String Int
 countHomeTeamOccurrences events =
     events
@@ -196,7 +215,10 @@ countHomeTeamOccurrences events =
             Dict.empty
 
 
+
 -- Find the team that appears most often as home team
+
+
 findMostFrequentHomeTeam : Dict String Int -> Maybe String
 findMostFrequentHomeTeam teamCounts =
     Dict.toList teamCounts
@@ -217,8 +239,11 @@ findMostFrequentHomeTeam teamCounts =
         |> Maybe.map Tuple.first
 
 
+
 -- Extract opponent name from SUMMARY field
 -- Uses the most frequent home team to determine home/away
+
+
 extractOpponent : String -> String -> ( String, Bool )
 extractOpponent summary mostFrequentHomeTeam =
     case extractTeams summary of
@@ -233,7 +258,10 @@ extractOpponent summary mostFrequentHomeTeam =
             ( summary, True )
 
 
+
 -- Convert ICS event to ParsedMatch
+
+
 icsEventToMatch : String -> IcsEvent -> ParsedMatch
 icsEventToMatch mostFrequentHomeTeam event =
     let
@@ -251,11 +279,15 @@ icsEventToMatch mostFrequentHomeTeam event =
     , time = time
     , venue = event.location
     , isHome = isHome
+    , startUtc = event.dtStart
     }
+
 
 
 -- Parse ICS and convert to matches
 -- Determines home team by counting which team appears most often as home
+
+
 parseIcsToMatches : String -> String -> List ParsedMatch
 parseIcsToMatches teamName icsContent =
     let
@@ -269,8 +301,9 @@ parseIcsToMatches teamName icsContent =
         -- Find the most frequent home team
         mostFrequentHomeTeam =
             findMostFrequentHomeTeam homeTeamCounts
-                |> Maybe.withDefault teamName -- Fallback to provided teamName if no matches found
+                |> Maybe.withDefault teamName
+
+        -- Fallback to provided teamName if no matches found
     in
     events
         |> List.map (icsEventToMatch mostFrequentHomeTeam)
-

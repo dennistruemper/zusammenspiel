@@ -5,7 +5,7 @@ import Lamdera exposing (ClientId, SessionId, sendToFrontend)
 import Random
 import Time
 import Types exposing (..)
-import Utils exposing (createSlug, generateMatchId, generateMemberId, generateRandomAccessCode, generateRandomTeamId, getAllMatches, getCurrentSeason, getSeasonHalf)
+import Utils exposing (createSlug, generateMatchId, generateMemberId, generateRandomAccessCode, generateRandomTeamId, getAllMatches, getCurrentSeason, getSeasonHalfFromStartUtc, getSeasonYearFromStartUtc)
 
 
 type alias Model =
@@ -235,7 +235,7 @@ updateFromFrontend sessionId clientId msg model =
                     , sendToFrontend clientId TeamNotFound
                     )
 
-        CreateMatchRequest teamId matchForm accessCode ->
+        CreateMatchRequest teamId matchPayload accessCode ->
             case Dict.get teamId model.teams of
                 Just teamData ->
                     -- Validate access code
@@ -244,22 +244,11 @@ updateFromFrontend sessionId clientId msg model =
                             matchId =
                                 generateMatchId model.nextId
 
-                            -- Determine season and half from date
                             season =
-                                case String.split "-" matchForm.date of
-                                    [ yearStr, _, _ ] ->
-                                        case String.toInt yearStr of
-                                            Just year ->
-                                                getCurrentSeason year
-
-                                            Nothing ->
-                                                getCurrentSeason 2024
-
-                                    _ ->
-                                        getCurrentSeason 2024
+                                getCurrentSeason (getSeasonYearFromStartUtc matchPayload.startUtc)
 
                             seasonHalf =
-                                if getSeasonHalf matchForm.date == "Hinrunde" then
+                                if getSeasonHalfFromStartUtc matchPayload.startUtc == "Hinrunde" then
                                     Hinrunde
 
                                 else
@@ -267,15 +256,14 @@ updateFromFrontend sessionId clientId msg model =
 
                             newMatch =
                                 { id = matchId
-                                , opponent = matchForm.opponent
-                                , date = matchForm.date
-                                , time = matchForm.time
-                                , isHome = matchForm.isHome
-                                , venue = matchForm.venue
+                                , opponent = matchPayload.opponent
+                                , startUtc = matchPayload.startUtc
+                                , isHome = matchPayload.isHome
+                                , venue = matchPayload.venue
                                 , season = season
                                 , seasonHalf = seasonHalf
                                 , matchday = 1 -- TODO: Calculate proper matchday
-                                , originalDate = Nothing
+                                , originalStartUtc = Nothing
                                 }
 
                             -- Add match to appropriate season/half
@@ -411,7 +399,7 @@ updateFromFrontend sessionId clientId msg model =
                 Nothing ->
                     ( model, Cmd.none )
 
-        ChangeMatchDateRequest matchId newDate teamId accessCode ->
+        ChangeMatchDateRequest matchId newStartUtc teamId accessCode ->
             case Dict.get teamId model.teams of
                 Just teamData ->
                     -- Validate access code
@@ -427,7 +415,7 @@ updateFromFrontend sessionId clientId msg model =
 
                             updatedTeamData =
                                 { teamData
-                                    | seasons = updateMatchInSeasons matchId (\match -> { match | date = newDate }) teamData.seasons
+                                    | seasons = updateMatchInSeasons matchId (\match -> { match | startUtc = newStartUtc }) teamData.seasons
                                     , availability = clearMatchAvailability teamData.availability
                                 }
 
@@ -435,7 +423,7 @@ updateFromFrontend sessionId clientId msg model =
                                 { model | teams = Dict.insert teamId updatedTeamData model.teams }
                         in
                         ( updatedModel
-                        , sendToTeamSessions teamId (MatchDateChanged matchId newDate) updatedModel
+                        , sendToTeamSessions teamId (MatchDateChanged matchId newStartUtc) updatedModel
                         )
 
                     else
@@ -528,7 +516,7 @@ updateFromFrontend sessionId clientId msg model =
                     -- Validate access code
                     if accessCode == teamData.team.accessCode then
                         let
-                            -- Get the match to check if we need to set originalDate
+                            -- Get the match to check if we need to set originalStartUtc
                             allMatches =
                                 teamData.seasons
                                     |> Dict.values
@@ -539,12 +527,12 @@ updateFromFrontend sessionId clientId msg model =
                                     |> List.filter (\match -> match.id == matchId)
                                     |> List.head
 
-                            -- Set originalDate if not already set
-                            ( updatedMatch, shouldSetOriginalDate ) =
+                            -- Set originalStartUtc if not already set
+                            ( updatedMatch, shouldSetOriginalStartUtc ) =
                                 case currentMatch of
                                     Just match ->
-                                        if match.originalDate == Nothing then
-                                            ( { match | originalDate = Just match.date }, True )
+                                        if match.originalStartUtc == Nothing then
+                                            ( { match | originalStartUtc = Just match.startUtc }, True )
 
                                         else
                                             ( match, False )
@@ -554,14 +542,13 @@ updateFromFrontend sessionId clientId msg model =
                                         ( Maybe.withDefault
                                             { id = matchId
                                             , opponent = ""
-                                            , date = ""
-                                            , time = ""
+                                            , startUtc = ""
                                             , isHome = False
                                             , venue = ""
                                             , season = ""
                                             , seasonHalf = Hinrunde
                                             , matchday = 0
-                                            , originalDate = Nothing
+                                            , originalStartUtc = Nothing
                                             }
                                             currentMatch
                                         , False
@@ -610,7 +597,7 @@ updateFromFrontend sessionId clientId msg model =
 
                             -- Update match in seasons if needed
                             updatedSeasons =
-                                if shouldSetOriginalDate then
+                                if shouldSetOriginalStartUtc then
                                     updateMatchInSeasons matchId (\_ -> updatedMatch) teamData.seasons
 
                                 else
@@ -626,17 +613,18 @@ updateFromFrontend sessionId clientId msg model =
                                 { model | teams = Dict.insert teamId updatedTeamData model.teams }
 
                             -- Send original date set message if we set it
-                            originalDateCmd =
-                                if shouldSetOriginalDate then
-                                    sendToTeamSessions teamId (MatchOriginalDateSet matchId updatedMatch.date) updatedModel
+                            originalStartUtcCmd =
+                                case updatedMatch.originalStartUtc of
+                                    Just startUtc ->
+                                        sendToTeamSessions teamId (MatchOriginalDateSet matchId startUtc) updatedModel
 
-                                else
-                                    Cmd.none
+                                    Nothing ->
+                                        Cmd.none
                         in
                         ( updatedModel
                         , Cmd.batch
                             [ sendToTeamSessions teamId (DatePredictionAdded newPrediction matchId) updatedModel
-                            , originalDateCmd
+                            , originalStartUtcCmd
                             ]
                         )
 
@@ -767,7 +755,7 @@ updateFromFrontend sessionId clientId msg model =
                 Nothing ->
                     ( model, Cmd.none )
 
-        ChoosePredictedDateRequest matchId chosenDate teamId accessCode ->
+        ChoosePredictedDateRequest matchId chosenDate newStartUtc teamId accessCode ->
             case Dict.get teamId model.teams of
                 Just teamData ->
                     -- Validate access code
@@ -820,7 +808,7 @@ updateFromFrontend sessionId clientId msg model =
 
                             updatedTeamData =
                                 { teamData
-                                    | seasons = updateMatchInSeasons matchId (\match -> { match | date = chosenDate }) teamData.seasons
+                                    | seasons = updateMatchInSeasons matchId (\match -> { match | startUtc = newStartUtc }) teamData.seasons
                                     , datePredictions = updatedPredictions
                                     , availability = updatedAvailability
                                 }
@@ -846,7 +834,7 @@ updateFromFrontend sessionId clientId msg model =
                         in
                         ( updatedModel
                         , Cmd.batch
-                            [ sendToTeamSessions teamId (MatchDateChanged matchId chosenDate) updatedModel
+                            [ sendToTeamSessions teamId (MatchDateChanged matchId newStartUtc) updatedModel
                             , sendToTeamSessions teamId (PredictionsCleared matchId) updatedModel
                             , availabilityUpdateCmds
                             ]

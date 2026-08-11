@@ -19,12 +19,96 @@ import Time
 import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
-import Utils exposing (createTeamUrl, extractAccessCodeFromUrl, extractTeamIdFromUrl, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByDate)
+import Utils exposing (createSlug, createTeamUrl, displayLocalTime, extractAccessCodeFromUrl, extractTeamIdFromUrl, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByStartUtc)
 import View.Dialog as Dialog
 
 
 type alias Model =
     FrontendModel
+
+
+collectUtcTimestampsFromMatches : List Match -> List String
+collectUtcTimestampsFromMatches matches =
+    matches
+        |> List.concatMap
+            (\match ->
+                match.startUtc
+                    :: (case match.originalStartUtc of
+                            Just originalStartUtc ->
+                                [ originalStartUtc ]
+
+                            Nothing ->
+                                []
+                       )
+            )
+        |> List.filter (not << String.isEmpty)
+
+
+requestUtcConversion : List String -> Cmd FrontendMsg
+requestUtcConversion utcStrings =
+    let
+        uniqueTimestamps =
+            utcStrings
+                |> List.foldr
+                    (\timestamp acc ->
+                        if String.isEmpty timestamp || List.member timestamp acc then
+                            acc
+
+                        else
+                            timestamp :: acc
+                    )
+                    []
+    in
+    if List.isEmpty uniqueTimestamps then
+        Cmd.none
+
+    else
+        LocalStorage.toJS ("CONVERT_UTC_BATCH:" ++ String.join "," uniqueTimestamps)
+
+
+buildIcsImportSelection : String -> Dict String { date : String, time : String } -> List ParsedMatch -> ( Dict Int Bool, String )
+buildIcsImportSelection today cache parsedMatches =
+    let
+        ( pastMatches, futureMatches ) =
+            separatePastAndFutureMatches today cache parsedMatches
+
+        initialSelection =
+            parsedMatches
+                |> List.indexedMap
+                    (\index match ->
+                        ( index, List.member match futureMatches )
+                    )
+                |> Dict.fromList
+
+        totalCount =
+            List.length parsedMatches
+
+        futureCount =
+            List.length futureMatches
+
+        pastCount =
+            List.length pastMatches
+
+        selectedCount =
+            List.length futureMatches
+
+        statusMessage =
+            "✓ "
+                ++ String.fromInt totalCount
+                ++ " Spiele gefunden ("
+                ++ String.fromInt futureCount
+                ++ " zukünftig"
+                ++ (if pastCount > 0 then
+                        ", " ++ String.fromInt pastCount ++ " vergangen"
+
+                    else
+                        ""
+                   )
+                ++ "). "
+                ++ String.fromInt selectedCount
+                ++ " werden importiert (zukünftige Spiele sind standardmäßig ausgewählt)."
+    in
+    ( initialSelection, statusMessage )
 
 
 app =
@@ -88,6 +172,9 @@ init url key =
             , showAddReservePlayerModal = False
             , addReservePlayerMatchId = Nothing
             , addReservePlayerForm = ""
+            , utcToLocalMap = Dict.empty
+            , icsImportConverting = False
+            , pendingLocalToUtc = Nothing
             }
 
         ( updatedModel, cmd ) =
@@ -243,8 +330,12 @@ update msg model =
                 ( model, Cmd.none )
 
             else
-                ( { model | showCreateMatchModal = False, createMatchForm = { opponent = "", date = "", time = "", venue = "", isHome = True } }
-                , Lamdera.sendToBackend (CreateMatchRequest teamId model.createMatchForm (Dict.get teamId model.confirmedTeamCodes |> Maybe.withDefault ""))
+                ( { model
+                    | showCreateMatchModal = False
+                    , pendingLocalToUtc = Just (PendingCreateMatch teamId model.createMatchForm)
+                    , createMatchForm = { opponent = "", date = "", time = "", venue = "", isHome = True }
+                  }
+                , LocalStorage.toJS ("CONVERT_LOCAL_TO_UTC:" ++ model.createMatchForm.date ++ "|" ++ model.createMatchForm.time)
                 )
 
         ShowCreateMatchModal ->
@@ -318,6 +409,99 @@ update msg model =
                         String.dropLeft 13 message
                 in
                 ( { model | currentDate = Just currentDate }, Cmd.none )
+
+            else if String.startsWith "UTC_CONVERTED:" message then
+                let
+                    jsonStr =
+                        String.dropLeft 14 message
+
+                    -- Decode JSON object: { "utcString": "date|time", ... }
+                    decoder =
+                        Json.Decode.dict Json.Decode.string
+
+                    parsedMap =
+                        case Json.Decode.decodeString decoder jsonStr of
+                            Ok dict ->
+                                Dict.map
+                                    (\_ value ->
+                                        case String.split "|" value of
+                                            [ date, time ] ->
+                                                { date = date, time = time }
+
+                                            _ ->
+                                                { date = "", time = "" }
+                                    )
+                                    dict
+
+                            Err _ ->
+                                Dict.empty
+
+                    -- Merge with existing map
+                    newUtcToLocalMap =
+                        Dict.union parsedMap model.utcToLocalMap
+
+                    ( importSelection, importStatus ) =
+                        if model.icsImportConverting && not (List.isEmpty model.allParsedIcsMatches) then
+                            case model.currentDate of
+                                Just today ->
+                                    buildIcsImportSelection today newUtcToLocalMap model.allParsedIcsMatches
+
+                                Nothing ->
+                                    buildIcsImportSelection "01.01.2099" newUtcToLocalMap model.allParsedIcsMatches
+
+                        else
+                            ( model.icsImportSelectedMatches, model.icsImportStatus |> Maybe.withDefault "" )
+
+                    updatedStatus =
+                        if model.icsImportConverting && not (List.isEmpty model.allParsedIcsMatches) then
+                            Just importStatus
+
+                        else
+                            model.icsImportStatus
+                in
+                ( { model
+                    | utcToLocalMap = newUtcToLocalMap
+                    , icsImportConverting = False
+                    , icsImportSelectedMatches = importSelection
+                    , icsImportStatus = updatedStatus
+                  }
+                , Cmd.none
+                )
+
+            else if String.startsWith "LOCAL_TO_UTC:" message then
+                let
+                    startUtc =
+                        String.dropLeft 13 message
+
+                    ( updatedModel, cmd ) =
+                        case model.pendingLocalToUtc of
+                            Just (PendingCreateMatch teamId form) ->
+                                ( { model | pendingLocalToUtc = Nothing }
+                                , Lamdera.sendToBackend
+                                    (CreateMatchRequest teamId
+                                        { opponent = form.opponent
+                                        , startUtc = startUtc
+                                        , venue = form.venue
+                                        , isHome = form.isHome
+                                        }
+                                        (Dict.get teamId model.confirmedTeamCodes |> Maybe.withDefault "")
+                                    )
+                                )
+
+                            Just (PendingChangeMatchDate matchId _ teamId accessCode) ->
+                                ( { model | pendingLocalToUtc = Nothing }
+                                , Lamdera.sendToBackend (ChangeMatchDateRequest matchId startUtc teamId accessCode)
+                                )
+
+                            Just (PendingChoosePredictedDate matchId chosenDate teamId accessCode) ->
+                                ( { model | pendingLocalToUtc = Nothing }
+                                , Lamdera.sendToBackend (ChoosePredictedDateRequest matchId chosenDate startUtc teamId accessCode)
+                                )
+
+                            Nothing ->
+                                ( model, Cmd.none )
+                in
+                ( updatedModel, cmd )
 
             else
                 ( model, Cmd.none )
@@ -399,7 +583,10 @@ update msg model =
             ( { model
                 | showChangeMatchDateModal = True
                 , changeMatchDateMatchId = Just matchId
-                , changeMatchDateForm = Maybe.map .date currentMatch |> Maybe.withDefault ""
+                , changeMatchDateForm =
+                    currentMatch
+                        |> Maybe.map (.startUtc >> displayLocalTime model.utcToLocalMap >> .date)
+                        |> Maybe.withDefault ""
               }
             , Cmd.none
             )
@@ -419,8 +606,19 @@ update msg model =
         ChangeMatchDateSubmitted matchId newDate ->
             case model.currentTeam of
                 Just team ->
-                    ( model
-                    , Lamdera.sendToBackend (ChangeMatchDateRequest matchId newDate team.id (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault ""))
+                    let
+                        accessCode =
+                            Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault ""
+
+                        localTime =
+                            model.matches
+                                |> List.filter (\match -> match.id == matchId)
+                                |> List.head
+                                |> Maybe.map (.startUtc >> displayLocalTime model.utcToLocalMap >> .time)
+                                |> Maybe.withDefault "00:00"
+                    in
+                    ( { model | pendingLocalToUtc = Just (PendingChangeMatchDate matchId newDate team.id accessCode) }
+                    , LocalStorage.toJS ("CONVERT_LOCAL_TO_UTC:" ++ newDate ++ "|" ++ localTime)
                     )
 
                 Nothing ->
@@ -436,7 +634,7 @@ update msg model =
             ( { model | showImportIcsModal = True, icsImportStatus = Nothing, showAddMatchDropdown = False }, Cmd.none )
 
         HideImportIcsModal ->
-            ( { model | showImportIcsModal = False, icsImportUrl = "", icsImportStatus = Nothing, parsedIcsMatches = [], allParsedIcsMatches = [], icsImportSelectedMatches = Dict.empty, showAddMatchDropdown = False }, Cmd.none )
+            ( { model | showImportIcsModal = False, icsImportUrl = "", icsImportStatus = Nothing, parsedIcsMatches = [], allParsedIcsMatches = [], icsImportSelectedMatches = Dict.empty, showAddMatchDropdown = False, utcToLocalMap = Dict.empty, icsImportConverting = False }, Cmd.none )
 
         ToggleAddMatchDropdown ->
             ( { model | showAddMatchDropdown = not model.showAddMatchDropdown }, Cmd.none )
@@ -482,7 +680,14 @@ update msg model =
             )
 
         IcsFileSelected file ->
-            ( { model | icsImportStatus = Just "Verarbeite ICS-Datei..." }
+            ( { model
+                | icsImportStatus = Just "Verarbeite ICS-Datei..."
+                , icsImportConverting = True
+                , parsedIcsMatches = []
+                , allParsedIcsMatches = []
+                , icsImportSelectedMatches = Dict.empty
+                , utcToLocalMap = Dict.empty
+              }
             , Task.perform IcsFileContentRead (File.toString file)
             )
 
@@ -510,78 +715,55 @@ update msg model =
                                     parseIcsToMatches team.name trimmedContent
                         in
                         if String.isEmpty trimmedContent then
-                            ( { model | icsImportStatus = Just "Fehler: Die ICS-Datei ist leer." }, Cmd.none )
+                            ( { model | icsImportStatus = Just "Fehler: Die ICS-Datei ist leer.", icsImportConverting = False }, Cmd.none )
 
                         else if not hasValidContent then
-                            ( { model | icsImportStatus = Just "Fehler: Die ICS-Datei scheint kein gültiges Format zu haben. Bitte überprüfen Sie die Datei." }, Cmd.none )
+                            ( { model | icsImportStatus = Just "Fehler: Die ICS-Datei scheint kein gültiges Format zu haben. Bitte überprüfen Sie die Datei.", icsImportConverting = False }, Cmd.none )
 
                         else if List.isEmpty parsedMatches then
-                            ( { model | icsImportStatus = Just ("Keine Spiele in der ICS-Datei gefunden. Team-Name: \"" ++ team.name ++ "\". Bitte überprüfen Sie, ob der Team-Name mit dem in der ICS-Datei übereinstimmt.") }, Cmd.none )
+                            ( { model | icsImportStatus = Just ("Keine Spiele in der ICS-Datei gefunden. Team-Name: \"" ++ team.name ++ "\". Bitte überprüfen Sie, ob der Team-Name mit dem in der ICS-Datei übereinstimmt."), icsImportConverting = False }, Cmd.none )
 
                         else
                             let
-                                -- Determine initial selection: future games checked, past games unchecked
-                                ( pastMatches, futureMatches ) =
-                                    case model.currentDate of
-                                        Just today ->
-                                            separatePastAndFutureMatches today parsedMatches
-
-                                        Nothing ->
-                                            ( [], parsedMatches )
-
-                                -- If no current date, assume all are future
-                                -- Build initial selection dict: future games = True, past games = False
-                                initialSelection =
-                                    parsedMatches
-                                        |> List.indexedMap
-                                            (\index match ->
-                                                let
-                                                    isFuture =
-                                                        List.member match futureMatches
-                                                in
-                                                ( index, isFuture )
-                                            )
-                                        |> Dict.fromList
-
                                 totalCount =
                                     List.length parsedMatches
 
-                                futureCount =
-                                    List.length futureMatches
+                                utcTimestamps =
+                                    parsedMatches
+                                        |> List.map .startUtc
+                                        |> List.filter (not << String.isEmpty)
 
-                                pastCount =
-                                    List.length pastMatches
+                                convertCmd =
+                                    requestUtcConversion utcTimestamps
 
-                                selectedCount =
-                                    List.length futureMatches
+                                needsConversion =
+                                    not (List.isEmpty utcTimestamps)
+
+                                ( initialSelection, statusMessage ) =
+                                    if needsConversion then
+                                        ( Dict.empty, "✓ " ++ String.fromInt totalCount ++ " Spiele gefunden. Zeiten werden umgerechnet..." )
+
+                                    else
+                                        case model.currentDate of
+                                            Just today ->
+                                                buildIcsImportSelection today Dict.empty parsedMatches
+
+                                            Nothing ->
+                                                buildIcsImportSelection "01.01.2099" Dict.empty parsedMatches
                             in
                             ( { model
                                 | parsedIcsMatches = parsedMatches
                                 , allParsedIcsMatches = parsedMatches
                                 , icsImportSelectedMatches = initialSelection
-                                , icsImportStatus =
-                                    Just
-                                        ("✓ "
-                                            ++ String.fromInt totalCount
-                                            ++ " Spiele gefunden ("
-                                            ++ String.fromInt futureCount
-                                            ++ " zukünftig"
-                                            ++ (if pastCount > 0 then
-                                                    ", " ++ String.fromInt pastCount ++ " vergangen"
-
-                                                else
-                                                    ""
-                                               )
-                                            ++ "). "
-                                            ++ String.fromInt selectedCount
-                                            ++ " werden importiert (zukünftige Spiele sind standardmäßig ausgewählt)."
-                                        )
+                                , utcToLocalMap = Dict.empty
+                                , icsImportConverting = needsConversion
+                                , icsImportStatus = Just statusMessage
                               }
-                            , Cmd.none
+                            , convertCmd
                             )
 
                     Nothing ->
-                        ( { model | icsImportStatus = Just "Fehler: Kein Team ausgewählt." }, Cmd.none )
+                        ( { model | icsImportStatus = Just "Fehler: Kein Team ausgewählt.", icsImportConverting = False }, Cmd.none )
 
         ConfirmImportIcs teamId ->
             case model.currentTeam of
@@ -605,17 +787,15 @@ update msg model =
                         createMatchCmds =
                             List.map
                                 (\parsedMatch ->
-                                    let
-                                        matchForm =
+                                    Lamdera.sendToBackend
+                                        (CreateMatchRequest team.id
                                             { opponent = parsedMatch.opponent
-                                            , date = parsedMatch.date
-                                            , time = parsedMatch.time
+                                            , startUtc = parsedMatch.startUtc
                                             , venue = parsedMatch.venue
                                             , isHome = parsedMatch.isHome
                                             }
-                                    in
-                                    Lamdera.sendToBackend
-                                        (CreateMatchRequest team.id matchForm (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault ""))
+                                            (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")
+                                        )
                                 )
                                 matchesToImport
                     in
@@ -626,6 +806,8 @@ update msg model =
                         , allParsedIcsMatches = []
                         , icsImportSelectedMatches = Dict.empty
                         , icsImportStatus = Just ("Erfolgreich " ++ String.fromInt (List.length matchesToImport) ++ " Spiele importiert!")
+                        , utcToLocalMap = Dict.empty
+                        , icsImportConverting = False
                       }
                     , Cmd.batch createMatchCmds
                     )
@@ -686,7 +868,10 @@ update msg model =
             ( { model
                 | showDatePredictionModal = True
                 , datePredictionMatchId = Just matchId
-                , datePredictionForm = Maybe.map .date currentMatch |> Maybe.withDefault ""
+                , datePredictionForm =
+                    currentMatch
+                        |> Maybe.map (.startUtc >> displayLocalTime model.utcToLocalMap >> .date)
+                        |> Maybe.withDefault ""
               }
             , Cmd.none
             )
@@ -751,13 +936,19 @@ update msg model =
         ChoosePredictedDate matchId chosenDate ->
             case model.currentTeam of
                 Just team ->
-                    ( model
-                    , Lamdera.sendToBackend
-                        (ChoosePredictedDateRequest matchId
-                            chosenDate
-                            team.id
-                            (Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault "")
-                        )
+                    let
+                        accessCode =
+                            Dict.get team.id model.confirmedTeamCodes |> Maybe.withDefault ""
+
+                        localTime =
+                            model.matches
+                                |> List.filter (\match -> match.id == matchId)
+                                |> List.head
+                                |> Maybe.map (.startUtc >> displayLocalTime model.utcToLocalMap >> .time)
+                                |> Maybe.withDefault "00:00"
+                    in
+                    ( { model | pendingLocalToUtc = Just (PendingChoosePredictedDate matchId chosenDate team.id accessCode) }
+                    , LocalStorage.toJS ("CONVERT_LOCAL_TO_UTC:" ++ chosenDate ++ "|" ++ localTime)
                     )
 
                 Nothing ->
@@ -864,7 +1055,7 @@ updateFromBackend msg model =
                 , reservePlayers = reservePlayers
                 , showMemberSelectionModal = shouldShowMemberSelection
               }
-            , Cmd.none
+            , requestUtcConversion (collectUtcTimestampsFromMatches matches)
             )
 
         TeamNotFound ->
@@ -874,7 +1065,9 @@ updateFromBackend msg model =
             ( { model | accessCodeRequired = Just teamId }, Cmd.none )
 
         MatchCreated match ->
-            ( { model | matches = match :: model.matches }, Cmd.none )
+            ( { model | matches = match :: model.matches }
+            , requestUtcConversion [ match.startUtc ]
+            )
 
         MemberCreated member ->
             let
@@ -911,22 +1104,18 @@ updateFromBackend msg model =
             in
             ( { model | availability = updatedAvailability }, Cmd.none )
 
-        MatchDateChanged matchId newDate ->
+        MatchDateChanged matchId newStartUtc ->
             let
-                -- Update the match date in the matches list
                 updatedMatches =
                     List.map
                         (\match ->
                             if match.id == matchId then
-                                { match | date = newDate }
+                                { match | startUtc = newStartUtc }
 
                             else
                                 match
                         )
                         model.matches
-
-                -- Don't clear availability here - AvailabilityUpdated messages will handle updates
-                -- This allows prediction migrations to work correctly
             in
             ( { model
                 | matches = updatedMatches
@@ -934,7 +1123,7 @@ updateFromBackend msg model =
                 , changeMatchDateMatchId = Nothing
                 , changeMatchDateForm = ""
               }
-            , Cmd.none
+            , requestUtcConversion [ newStartUtc ]
             )
 
         DatePredictionAdded prediction matchId ->
@@ -1029,21 +1218,22 @@ updateFromBackend msg model =
             in
             ( { model | datePredictions = updatedPredictions }, Cmd.none )
 
-        MatchOriginalDateSet matchId originalDate ->
+        MatchOriginalDateSet matchId originalStartUtc ->
             let
-                -- Update the match's originalDate field
                 updatedMatches =
                     List.map
                         (\match ->
                             if match.id == matchId then
-                                { match | originalDate = Just originalDate }
+                                { match | originalStartUtc = Just originalStartUtc }
 
                             else
                                 match
                         )
                         model.matches
             in
-            ( { model | matches = updatedMatches }, Cmd.none )
+            ( { model | matches = updatedMatches }
+            , requestUtcConversion [ originalStartUtc ]
+            )
 
         ReservePlayerAdded matchId reservePlayerName teamId ->
             let
@@ -1444,8 +1634,38 @@ viewCreateTeamPage model =
         ]
 
 
-viewParsedMatchesTable : Dict Int Bool -> List ParsedMatch -> Html FrontendMsg
-viewParsedMatchesTable selectedMatches parsedMatches =
+viewIcsImportSpinner : Html msg
+viewIcsImportSpinner =
+    Html.div
+        [ Attr.style "display" "flex"
+        , Attr.style "flex-direction" "column"
+        , Attr.style "align-items" "center"
+        , Attr.style "justify-content" "center"
+        , Attr.style "padding" "2rem"
+        , Attr.style "gap" "1rem"
+        ]
+        [ Html.node "style" []
+            [ Html.text "@keyframes ics-import-spin { to { transform: rotate(360deg); } }" ]
+        , Html.div
+            [ Attr.style "width" "2rem"
+            , Attr.style "height" "2rem"
+            , Attr.style "border" "3px solid #e5e7eb"
+            , Attr.style "border-top-color" "#10b981"
+            , Attr.style "border-radius" "50%"
+            , Attr.style "animation" "ics-import-spin 0.8s linear infinite"
+            ]
+            []
+        , Html.p
+            [ Attr.style "color" "#64748b"
+            , Attr.style "font-size" "0.875rem"
+            , Attr.style "margin" "0"
+            ]
+            [ Html.text "Spiele werden verarbeitet..." ]
+        ]
+
+
+viewParsedMatchesTable : Dict String { date : String, time : String } -> Dict Int Bool -> List ParsedMatch -> Html FrontendMsg
+viewParsedMatchesTable utcToLocalMap selectedMatches parsedMatches =
     Html.div
         [ Attr.style "overflow-x" "auto"
         , Attr.style "border" "1px solid #e5e7eb"
@@ -1513,6 +1733,15 @@ viewParsedMatchesTable selectedMatches parsedMatches =
                         let
                             isSelected =
                                 Dict.get index selectedMatches |> Maybe.withDefault False
+
+                            localDisplay =
+                                displayLocalTime utcToLocalMap match.startUtc
+
+                            displayDate =
+                                localDisplay.date
+
+                            displayTime =
+                                localDisplay.time
                         in
                         Html.tr
                             [ Attr.style "border-bottom" "1px solid #e5e7eb"
@@ -1540,12 +1769,12 @@ viewParsedMatchesTable selectedMatches parsedMatches =
                                 [ Attr.style "padding" "0.75rem"
                                 , Attr.style "color" "#374151"
                                 ]
-                                [ Html.text match.date ]
+                                [ Html.text displayDate ]
                             , Html.td
                                 [ Attr.style "padding" "0.75rem"
                                 , Attr.style "color" "#374151"
                                 ]
-                                [ Html.text match.time ]
+                                [ Html.text displayTime ]
                             , Html.td
                                 [ Attr.style "padding" "0.75rem"
                                 , Attr.style "color" "#374151"
@@ -2111,26 +2340,13 @@ viewMatchesSection model team =
             model.currentDate |> Maybe.withDefault "01.01.2024"
 
         ( pastMatches, futureMatches ) =
-            separatePastAndFutureMatches today model.matches
+            separatePastAndFutureMatches today model.utcToLocalMap model.matches
 
-        -- Convert German date (dd.mm.yyyy) to sortable format (yyyy-mm-dd)
-        -- IMPORTANT: Pad with zeros to ensure correct string comparison
-        germanDateToSortable : String -> String
-        germanDateToSortable dateStr =
-            case String.split "." dateStr of
-                [ day, month, year ] ->
-                    year ++ "-" ++ String.padLeft 2 '0' month ++ "-" ++ String.padLeft 2 '0' day
-
-                _ ->
-                    dateStr
-
-        -- Sort past matches by oldest first (chronological order)
         sortedPastMatches =
-            List.sortWith (\a b -> compare (germanDateToSortable a.date) (germanDateToSortable b.date)) pastMatches
+            sortMatchesByStartUtc pastMatches
 
-        -- Sort future matches by earliest first (next match at top)
         sortedFutureMatches =
-            List.sortWith (\a b -> compare (germanDateToSortable a.date) (germanDateToSortable b.date)) futureMatches
+            sortMatchesByStartUtc futureMatches
 
         pastMatchesToShow =
             List.take model.pastMatchesShown sortedPastMatches
@@ -2456,10 +2672,17 @@ viewDatePredictionSection model match =
             not (Dict.isEmpty predictionsByDate)
 
         originalDateDisplay =
-            case match.originalDate of
-                Just origDate ->
-                    if origDate /= match.date then
-                        Just origDate
+            case match.originalStartUtc of
+                Just originalStartUtc ->
+                    let
+                        currentLocal =
+                            displayLocalTime model.utcToLocalMap match.startUtc
+
+                        originalLocal =
+                            displayLocalTime model.utcToLocalMap originalStartUtc
+                    in
+                    if originalLocal.date /= currentLocal.date then
+                        Just originalLocal.date
 
                     else
                         Nothing
@@ -2483,7 +2706,7 @@ viewDatePredictionSection model match =
                     , Attr.style "font-size" "0.75rem"
                     , Attr.style "color" "#92400e"
                     ]
-                    [ Html.text ("Ursprüngliches Datum: " ++ isoToGermanDate origDate) ]
+                    [ Html.text ("Ursprüngliches Datum: " ++ origDate) ]
 
             Nothing ->
                 Html.text ""
@@ -3048,8 +3271,11 @@ viewMatchItem model team match isLast =
         today =
             model.currentDate |> Maybe.withDefault "01.01.2024"
 
+        localDisplay =
+            displayLocalTime model.utcToLocalMap match.startUtc
+
         matchStatus =
-            getMatchStatus match.id match.date today model.members model.availability team.playersNeeded model.datePredictions model.reservePlayers
+            getMatchStatus match.id localDisplay.date today model.members model.availability team.playersNeeded model.datePredictions model.reservePlayers
 
         statusBackgroundColor =
             matchStatusToBackgroundColor matchStatus
@@ -3110,9 +3336,13 @@ viewMatchItem model team match isLast =
                             , Attr.style "font-size" "0.875rem"
                             ]
                             [ Html.text
-                                ((case match.originalDate of
-                                    Just origDate ->
-                                        if origDate /= match.date then
+                                ((case match.originalStartUtc of
+                                    Just originalStartUtc ->
+                                        let
+                                            originalLocal =
+                                                displayLocalTime model.utcToLocalMap originalStartUtc
+                                        in
+                                        if originalLocal.date /= localDisplay.date then
                                             "Geplanter Termin: "
 
                                         else
@@ -3121,9 +3351,9 @@ viewMatchItem model team match isLast =
                                     Nothing ->
                                         ""
                                  )
-                                    ++ match.date
+                                    ++ localDisplay.date
                                     ++ " um "
-                                    ++ match.time
+                                    ++ localDisplay.time
                                 )
                             ]
                         , viewDatePredictionSection model match
@@ -4839,37 +5069,44 @@ viewImportIcsModal model team =
                     ]
                 , case model.icsImportStatus of
                     Just status ->
-                        Html.div
-                            [ Attr.style "padding" "0.75rem"
-                            , Attr.style "border-radius" "0.375rem"
-                            , Attr.style "margin-bottom" "1rem"
-                            , Attr.style "background-color"
-                                (if String.startsWith "Erfolgreich" status then
-                                    "#d1fae5"
+                        if model.icsImportConverting then
+                            Html.text ""
 
-                                 else if String.startsWith "Fehler" status then
-                                    "#fee2e2"
+                        else
+                            Html.div
+                                [ Attr.style "padding" "0.75rem"
+                                , Attr.style "border-radius" "0.375rem"
+                                , Attr.style "margin-bottom" "1rem"
+                                , Attr.style "background-color"
+                                    (if String.startsWith "Erfolgreich" status then
+                                        "#d1fae5"
 
-                                 else
-                                    "#fef3c7"
-                                )
-                            , Attr.style "color"
-                                (if String.startsWith "Erfolgreich" status then
-                                    "#065f46"
+                                     else if String.startsWith "Fehler" status then
+                                        "#fee2e2"
 
-                                 else if String.startsWith "Fehler" status then
-                                    "#991b1b"
+                                     else
+                                        "#fef3c7"
+                                    )
+                                , Attr.style "color"
+                                    (if String.startsWith "Erfolgreich" status then
+                                        "#065f46"
 
-                                 else
-                                    "#92400e"
-                                )
-                            , Attr.style "font-size" "0.875rem"
-                            ]
-                            [ Html.text status ]
+                                     else if String.startsWith "Fehler" status then
+                                        "#991b1b"
+
+                                     else
+                                        "#92400e"
+                                    )
+                                , Attr.style "font-size" "0.875rem"
+                                ]
+                                [ Html.text status ]
 
                     Nothing ->
                         Html.text ""
-                , if List.isEmpty model.parsedIcsMatches then
+                , if model.icsImportConverting then
+                    viewIcsImportSpinner
+
+                  else if List.isEmpty model.parsedIcsMatches then
                     Html.text ""
 
                   else
@@ -4891,56 +5128,60 @@ viewImportIcsModal model team =
                                 ]
                                 [ Html.text ("Gefundene Spiele (" ++ String.fromInt (List.length model.allParsedIcsMatches) ++ ")") ]
                             ]
-                        , viewParsedMatchesTable model.icsImportSelectedMatches model.allParsedIcsMatches
+                        , viewParsedMatchesTable model.utcToLocalMap model.icsImportSelectedMatches model.allParsedIcsMatches
                         ]
-                , Html.div
-                    [ Attr.style "display" "flex"
-                    , Attr.style "gap" "0.75rem"
-                    , Attr.style "justify-content" "flex-end"
-                    ]
-                    [ Html.button
-                        [ Events.onClick HideImportIcsModal
-                        , Attr.style "padding" "0.75rem 1.5rem"
-                        , Attr.style "border" "1px solid #d1d5db"
-                        , Attr.style "border-radius" "0.375rem"
-                        , Attr.style "background-color" "white"
-                        , Attr.style "color" "#374151"
-                        , Attr.style "font-weight" "500"
-                        , Attr.style "cursor" "pointer"
-                        , Attr.style "font-size" "0.875rem"
+                , if model.icsImportConverting then
+                    Html.text ""
+
+                  else
+                    Html.div
+                        [ Attr.style "display" "flex"
+                        , Attr.style "gap" "0.75rem"
+                        , Attr.style "justify-content" "flex-end"
                         ]
-                        [ Html.text "Abbrechen" ]
-                    , let
-                        selectedCount =
-                            model.allParsedIcsMatches
-                                |> List.indexedMap Tuple.pair
-                                |> List.filterMap
-                                    (\( index, _ ) ->
-                                        if Dict.get index model.icsImportSelectedMatches |> Maybe.withDefault False then
-                                            Just index
-
-                                        else
-                                            Nothing
-                                    )
-                                |> List.length
-                      in
-                      if selectedCount == 0 then
-                        Html.text ""
-
-                      else
-                        Html.button
-                            [ Events.onClick (ConfirmImportIcs team.id)
+                        [ Html.button
+                            [ Events.onClick HideImportIcsModal
                             , Attr.style "padding" "0.75rem 1.5rem"
-                            , Attr.style "border" "none"
+                            , Attr.style "border" "1px solid #d1d5db"
                             , Attr.style "border-radius" "0.375rem"
-                            , Attr.style "background-color" "#10b981"
-                            , Attr.style "color" "white"
+                            , Attr.style "background-color" "white"
+                            , Attr.style "color" "#374151"
                             , Attr.style "font-weight" "500"
                             , Attr.style "cursor" "pointer"
                             , Attr.style "font-size" "0.875rem"
                             ]
-                            [ Html.text ("Importieren (" ++ String.fromInt selectedCount ++ ")") ]
-                    ]
+                            [ Html.text "Abbrechen" ]
+                        , let
+                            selectedCount =
+                                model.allParsedIcsMatches
+                                    |> List.indexedMap Tuple.pair
+                                    |> List.filterMap
+                                        (\( index, _ ) ->
+                                            if Dict.get index model.icsImportSelectedMatches |> Maybe.withDefault False then
+                                                Just index
+
+                                            else
+                                                Nothing
+                                        )
+                                    |> List.length
+                          in
+                          if selectedCount == 0 then
+                            Html.text ""
+
+                          else
+                            Html.button
+                                [ Events.onClick (ConfirmImportIcs team.id)
+                                , Attr.style "padding" "0.75rem 1.5rem"
+                                , Attr.style "border" "none"
+                                , Attr.style "border-radius" "0.375rem"
+                                , Attr.style "background-color" "#10b981"
+                                , Attr.style "color" "white"
+                                , Attr.style "font-weight" "500"
+                                , Attr.style "cursor" "pointer"
+                                , Attr.style "font-size" "0.875rem"
+                                ]
+                                [ Html.text ("Importieren (" ++ String.fromInt selectedCount ++ ")") ]
+                        ]
                 ]
             ]
         ]

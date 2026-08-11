@@ -44,14 +44,13 @@ type SeasonHalf
 type alias Match =
     { id : String
     , opponent : String
-    , date : String -- German format for display: "25.12.2024"
-    , time : String -- "14:30"
+    , startUtc : String -- ICS UTC timestamp: "20250922T180000Z"
     , isHome : Bool
     , venue : String
     , season : Season
     , seasonHalf : SeasonHalf
     , matchday : Int -- Spieltag number within the half
-    , originalDate : Maybe String -- Original date before predictions (Nothing if never changed)
+    , originalStartUtc : Maybe String -- Original start time before predictions (Nothing if never changed)
     }
 
 
@@ -145,6 +144,9 @@ type alias FrontendModel =
     , showAddReservePlayerModal : Bool
     , addReservePlayerMatchId : Maybe String -- ID of match for which we're adding a reserve player
     , addReservePlayerForm : String -- Name input for new reserve player
+    , utcToLocalMap : Dict String { date : String, time : String } -- UTC timestamp -> local date/time (UI only)
+    , icsImportConverting : Bool -- Waiting for ICS parse and UTC-to-local conversion
+    , pendingLocalToUtc : Maybe PendingLocalToUtc -- Waiting for local date/time -> UTC conversion
     }
 
 
@@ -166,11 +168,25 @@ type alias CreateTeamForm =
 
 type alias CreateMatchForm =
     { opponent : String
-    , date : String
-    , time : String
+    , date : String -- Local date input (dd.mm.yyyy), UI only
+    , time : String -- Local time input (HH:mm), UI only
     , venue : String
     , isHome : Bool
     }
+
+
+type alias CreateMatchPayload =
+    { opponent : String
+    , startUtc : String
+    , venue : String
+    , isHome : Bool
+    }
+
+
+type PendingLocalToUtc
+    = PendingCreateMatch TeamId CreateMatchForm
+    | PendingChangeMatchDate String String TeamId String
+    | PendingChoosePredictedDate String String TeamId String
 
 
 type alias CreateMemberForm =
@@ -258,14 +274,14 @@ type ToBackend
     = CreateTeamRequest String String (List String) Int String
     | GetTeamRequest TeamId String -- teamId, accessCode
     | SubmitAccessCode TeamId String -- teamId, accessCode
-    | CreateMatchRequest TeamId CreateMatchForm String -- teamId, form, accessCode
+    | CreateMatchRequest TeamId CreateMatchPayload String -- teamId, payload, accessCode
     | CreateMemberRequest TeamId CreateMemberForm String -- teamId, form, accessCode
     | UpdateAvailabilityRequest String String Availability String -- memberId, matchId, availability, accessCode
-    | ChangeMatchDateRequest String String String String -- matchId, newDate, teamId, accessCode
+    | ChangeMatchDateRequest String String String String -- matchId, newStartUtc, teamId, accessCode
     | AddDatePredictionRequest String String String String -- matchId, predictedDate, memberId, accessCode
     | UpdatePredictionAvailabilityRequest String String String Availability String -- matchId, predictedDate, memberId, availability, accessCode
     | RemoveDatePredictionRequest String String String -- matchId, memberId, accessCode
-    | ChoosePredictedDateRequest String String String String -- matchId, chosenDate, teamId, accessCode
+    | ChoosePredictedDateRequest String String String String String -- matchId, chosenDate, newStartUtc, teamId, accessCode
     | AddReservePlayerRequest String String String String -- matchId, reservePlayerName, teamId, accessCode
     | RemoveReservePlayerRequest String String String String -- matchId, reservePlayerName, teamId, accessCode
     | NoOpToBackend
@@ -283,12 +299,12 @@ type ToFrontend
     | MatchCreated Match
     | MemberCreated Member
     | AvailabilityUpdated AvailabilityRecord
-    | MatchDateChanged String String -- matchId, newDate
+    | MatchDateChanged String String -- matchId, newStartUtc
     | DatePredictionAdded DatePrediction String -- DatePrediction, matchId
     | DatePredictionUpdated DatePrediction String -- DatePrediction, matchId
     | DatePredictionRemoved String String -- matchId, memberId
     | PredictionsCleared String -- matchId
-    | MatchOriginalDateSet String String -- matchId, originalDate
+    | MatchOriginalDateSet String String -- matchId, originalStartUtc
     | ReservePlayerAdded String String String -- matchId, reservePlayerName, teamId
     | ReservePlayerRemoved String String String -- matchId, reservePlayerName, teamId
     | NoOpToFrontend
