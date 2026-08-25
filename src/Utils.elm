@@ -1,4 +1,4 @@
-module Utils exposing (createSlug, createTeamUrl, displayLocalTime, extractAccessCodeFromUrl, extractTeamIdFromUrl, generateMatchId, generateMemberId, generateRandomAccessCode, generateRandomTeamId, germanDateTimeToStartUtc, getAllMatches, getCurrentSeason, getSeasonHalfFromStartUtc, getSeasonYearFromStartUtc, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByStartUtc, startUtcMonth, startUtcYear)
+module Utils exposing (createSlug, createTeamUrl, displayLocalTime, extractAccessCodeFromUrl, extractTeamIdFromUrl, formatGermanDateWithWeekday, formatIsoDateWithWeekday, formatLocalDateTimeDisplay, generateMatchId, generateMemberId, generateRandomAccessCode, generateRandomTeamId, germanDateTimeToStartUtc, getAllMatches, getCurrentSeason, getSeasonHalfFromStartUtc, getSeasonYearFromStartUtc, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByStartUtc, startUtcMonth, startUtcYear)
 
 import Char
 import Dict exposing (Dict)
@@ -461,6 +461,87 @@ isoToGermanDate isoDate =
 
         _ ->
             isoDate
+
+
+
+-- Weekday helpers for German dates (dd.mm.yyyy)
+
+
+weekdayNamesGerman : List String
+weekdayNamesGerman =
+    [ "Mo", "Di", "Mi", "Do", "Fr", "Sa", "So" ]
+
+
+dayOfWeekMonFirst : Int -> Int -> Int -> Int
+dayOfWeekMonFirst day month year =
+    let
+        adjustedMonth =
+            if month < 3 then
+                month + 12
+
+            else
+                month
+
+        adjustedYear =
+            if month < 3 then
+                year - 1
+
+            else
+                year
+
+        k =
+            adjustedYear // 100
+
+        j =
+            modBy 100 adjustedYear
+
+        h =
+            modBy 7 (day + (13 * (adjustedMonth + 1) // 5) + j + (j // 4) + (k // 4) - (2 * k))
+    in
+    modBy 7 (h + 5)
+
+
+germanWeekdayShort : String -> String
+germanWeekdayShort dateStr =
+    case String.split "." dateStr of
+        [ dayStr, monthStr, yearStr ] ->
+            case ( String.toInt dayStr, String.toInt monthStr, String.toInt yearStr ) of
+                ( Just day, Just month, Just year ) ->
+                    weekdayNamesGerman
+                        |> List.drop (dayOfWeekMonFirst day month year)
+                        |> List.head
+                        |> Maybe.withDefault ""
+
+                _ ->
+                    ""
+
+        _ ->
+            ""
+
+
+formatGermanDateWithWeekday : String -> String
+formatGermanDateWithWeekday dateStr =
+    let
+        weekday =
+            germanWeekdayShort dateStr
+    in
+    if String.isEmpty weekday then
+        dateStr
+
+    else
+        weekday ++ ", " ++ dateStr
+
+
+formatIsoDateWithWeekday : String -> String
+formatIsoDateWithWeekday isoDate =
+    isoDate
+        |> isoToGermanDate
+        |> formatGermanDateWithWeekday
+
+
+formatLocalDateTimeDisplay : { date : String, time : String } -> String
+formatLocalDateTimeDisplay local =
+    formatGermanDateWithWeekday local.date ++ " um " ++ local.time
 
 
 generateRandomAccessCode : Random.Seed -> ( String, Random.Seed )

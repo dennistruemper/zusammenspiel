@@ -19,7 +19,7 @@ import Time
 import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
-import Utils exposing (createSlug, createTeamUrl, displayLocalTime, extractAccessCodeFromUrl, extractTeamIdFromUrl, isoToGermanDate, separatePastAndFutureMatches, sortMatchesByStartUtc)
+import Utils exposing (createSlug, createTeamUrl, displayLocalTime, extractAccessCodeFromUrl, extractTeamIdFromUrl, formatGermanDateWithWeekday, formatIsoDateWithWeekday, formatLocalDateTimeDisplay, separatePastAndFutureMatches, sortMatchesByStartUtc)
 import View.Dialog as Dialog
 
 
@@ -2706,7 +2706,7 @@ viewDatePredictionSection model match =
                     , Attr.style "font-size" "0.75rem"
                     , Attr.style "color" "#92400e"
                     ]
-                    [ Html.text ("Ursprüngliches Datum: " ++ origDate) ]
+                    [ Html.text ("Ursprüngliches Datum: " ++ formatGermanDateWithWeekday origDate) ]
 
             Nothing ->
                 Html.text ""
@@ -2849,7 +2849,7 @@ viewPredictedDateCard model match predictedDate datePredictions =
                         , Attr.style "color" "#1e293b"
                         , Attr.style "margin-bottom" "0.25rem"
                         ]
-                        [ Html.text ("Vorschlag: " ++ isoToGermanDate predictedDate) ]
+                        [ Html.text ("Vorschlag: " ++ formatIsoDateWithWeekday predictedDate) ]
                     , Html.div
                         [ Attr.style "font-size" "0.75rem"
                         , Attr.style "color" "#64748b"
@@ -3351,9 +3351,7 @@ viewMatchItem model team match isLast =
                                     Nothing ->
                                         ""
                                  )
-                                    ++ localDisplay.date
-                                    ++ " um "
-                                    ++ localDisplay.time
+                                    ++ formatLocalDateTimeDisplay localDisplay
                                 )
                             ]
                         , viewDatePredictionSection model match
